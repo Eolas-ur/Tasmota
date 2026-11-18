@@ -254,6 +254,7 @@ void UpdateQuickPowerCycle(bool update) {
     uint32_t counter = 1;
     while ((0 == qpc_buffer[counter]) && (counter <= QPC_COUNT)) { counter++; }
     if (QPC_COUNT == counter) {  // 7 power cycles in a row
+      AddLog(LOG_LEVEL_INFO, PSTR("QPC: Settings erase initiated"));
       SettingsErase(3);          // Quickly reset all settings including QuickPowerCycle flag
       EspRestart();              // And restart
     } else {
@@ -267,7 +268,7 @@ void UpdateQuickPowerCycle(bool update) {
     // Assume flash is default all ones and setting a bit to zero does not need an erase
     if (ESP.flashEraseSector(qpc_sector)) {
       ESP.flashWrite(qpc_location, (uint32*)&qpc_buffer, 4);
-      AddLog(LOG_LEVEL_INFO, PSTR("QPC: Reset"));
+      AddLog(LOG_LEVEL_INFO, PSTR("QPC: Counter cleared"));
     }
   }
 #endif  // ESP8266
@@ -279,6 +280,7 @@ void UpdateQuickPowerCycle(bool update) {
     if (0xF == counter) { counter = 0; }
     counter++;
     if (QPC_COUNT == counter) {  // 7 power cycles in a row
+      AddLog(LOG_LEVEL_INFO, PSTR("QPC: Settings erase initiated"));
       SettingsErase(3);          // Quickly reset all settings including QuickPowerCycle flag
       EspRestart();              // And restart
     } else {
@@ -290,7 +292,7 @@ void UpdateQuickPowerCycle(bool update) {
   else if (pc_register != QPC_SIGNATURE) {
     pc_register = QPC_SIGNATURE;
     QPCWrite(&pc_register, sizeof(pc_register));
-    AddLog(LOG_LEVEL_INFO, PSTR("QPC: Reset"));
+    AddLog(LOG_LEVEL_INFO, PSTR("QPC: Counter cleared"));
   }
 #endif  // ESP32
 #ifdef USE_COUNTER
