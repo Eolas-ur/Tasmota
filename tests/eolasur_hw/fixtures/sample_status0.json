@@ -1,0 +1,75 @@
+{
+  "Status": {
+    "Module": 0,
+    "DeviceName": "ExamplePlug",
+    "FriendlyName": ["ExamplePlug"],
+    "Topic": "ExamplePlug",
+    "Power": "0",
+    "PowerOnState": 3
+  },
+  "StatusPRM": {
+    "Uptime": "0T01:00:00",
+    "CfgHolder": 4617,
+    "BootCount": 1,
+    "SaveCount": 10,
+    "RestartReason": "Software/System restart",
+    "StartupUTC": "2026-01-01T00:00:00",
+    "OtaUrl": "http://ota.tasmota.com/tasmota/release/tasmota.bin.gz"
+  },
+  "StatusFWR": {
+    "Version": "16.0.0.5(tasmota)",
+    "BuildDateTime": "2026-11-18T17:07:44",
+    "Boot": 31,
+    "Core": "2.7.8",
+    "SDK": "2.2.2-dev(38a443e)",
+    "CpuFrequency": 80,
+    "Hardware": "ESP8285H16"
+  },
+  "StatusLOG": {
+    "SerialLog": 0,
+    "WebLog": 2,
+    "MqttLog": 0,
+    "SysLog": 0,
+    "SSId": ["ExampleSSID", ""]
+  },
+  "StatusMEM": {
+    "ProgramSize": 637,
+    "Free": 364,
+    "Heap": 23,
+    "ProgramFlashSize": 1024,
+    "FlashSize": 2048,
+    "FlashChipId": "1540A1",
+    "FlashFrequency": 40,
+    "FlashMode": "DOUT"
+  },
+  "StatusNET": {
+    "Hostname": "ExamplePlug-0001",
+    "IPAddress": "192.0.2.10",
+    "Gateway": "192.0.2.1",
+    "Subnetmask": "255.255.255.0",
+    "DNSServer1": "192.0.2.1",
+    "DNSServer2": "0.0.0.0",
+    "Mac": "02:00:00:00:00:01",
+    "Webserver": 2,
+    "HTTP_API": 1,
+    "WifiConfig": 4
+  },
+  "StatusMQT": {
+    "MqttHost": "mqtt.example.test",
+    "MqttPort": 1883,
+    "MqttClientMask": "tasmota-ExamplePlug",
+    "MqttClient": "tasmota-ExamplePlug",
+    "MqttUser": "<redacted>",
+    "MqttCount": 0,
+    "MqttTLS": 0
+  },
+  "StatusSTS": {
+    "UptimeSec": 3600,
+    "Heap": 23,
+    "POWER": "OFF",
+    "Wifi": {
+      "BSSId": "02:00:00:00:00:AA",
+      "RSSI": 100
+    }
+  }
+}

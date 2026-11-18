@@ -1,0 +1,9 @@
+# Private device data — never commit
+local/
+baselines/
+evidence/
+results/
+
+# Bytecode
+__pycache__/
+*.py[cod]

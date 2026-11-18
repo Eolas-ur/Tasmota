@@ -1,0 +1,142 @@
+{
+  "schema": "eolasur-tasmota-hw-baseline/v1",
+  "label": "example-synthetic-device",
+  "captured_at_utc": "2026-01-01T00:00:00Z",
+  "source_host": "tasmota-example.local",
+  "notes": [
+    "Synthetic fixture for documentation and unit tests.",
+    "Contains no real site infrastructure identifiers."
+  ],
+  "identity": {
+    "firmware": {
+      "version": "16.0.0.5(tasmota)",
+      "build_datetime": "2026-11-18T17:07:44",
+      "core": "2.7.8",
+      "sdk": "2.2.2-dev(38a443e)",
+      "hardware": "ESP8285H16",
+      "boot": 31,
+      "cpu_mhz": 80
+    },
+    "device": {
+      "device_name": "ExamplePlug",
+      "friendly_name": ["ExamplePlug"],
+      "topic": "ExamplePlug",
+      "hostname": "ExamplePlug-0001",
+      "mac": "02:00:00:00:00:01",
+      "module": {"0": "Athom Plug V2"},
+      "template": {
+        "NAME": "Athom Plug V2",
+        "ARCH": "ESP8266",
+        "GPIO": [0, 0, 0, 3104, 0, 32, 0, 0, 224, 576, 0, 0, 0, 0],
+        "FLAG": 0,
+        "BASE": 18
+      }
+    },
+    "network": {
+      "ip_address": "192.0.2.10",
+      "gateway": "192.0.2.1",
+      "subnetmask": "255.255.255.0",
+      "dns1": "192.0.2.1",
+      "dns2": "0.0.0.0",
+      "ssid_present": true,
+      "wifi_config": 4,
+      "webserver": 2,
+      "http_api": 1,
+      "ssid": "ExampleSSID",
+      "bssid": "02:00:00:00:00:AA"
+    },
+    "power": {
+      "power": "OFF",
+      "power_on_state": 3
+    },
+    "qpc": {
+      "setoption65": "OFF",
+      "fast_power_cycle_disable": false
+    },
+    "memory": {
+      "program_size_kb": 637,
+      "free_kb": 364,
+      "heap_kb": 23,
+      "program_flash_kb": 1024,
+      "flash_size_kb": 2048,
+      "flash_chip_id": "1540A1",
+      "flash_mode": "DOUT",
+      "flash_mhz": 40
+    },
+    "runtime": {
+      "uptime": "0T01:00:00",
+      "uptime_sec": 3600,
+      "restart_reason": "Software/System restart",
+      "boot_count": 1,
+      "cfg_holder": 4617,
+      "save_count": 10,
+      "startup_utc": "2026-01-01T00:00:00",
+      "ota_url": "http://ota.tasmota.com/tasmota/release/tasmota.bin.gz"
+    },
+    "mqtt": {
+      "host": "mqtt.example.test",
+      "port": 1883,
+      "client": "tasmota-ExamplePlug",
+      "client_mask": "tasmota-ExamplePlug",
+      "connected_count": 0,
+      "tls": 0
+    },
+    "logging": {
+      "weblog": 2,
+      "seriallog": 0,
+      "mqttlog": 0,
+      "syslog": 0
+    }
+  },
+  "status0_sanitised": {
+    "Status": {
+      "Module": 0,
+      "DeviceName": "ExamplePlug",
+      "FriendlyName": ["ExamplePlug"],
+      "Topic": "ExamplePlug",
+      "Power": "0",
+      "PowerOnState": 3
+    },
+    "StatusFWR": {
+      "Version": "16.0.0.5(tasmota)",
+      "BuildDateTime": "2026-11-18T17:07:44",
+      "Hardware": "ESP8285H16",
+      "Core": "2.7.8",
+      "SDK": "2.2.2-dev(38a443e)"
+    },
+    "StatusMEM": {
+      "ProgramSize": 637,
+      "Free": 364,
+      "Heap": 23,
+      "ProgramFlashSize": 1024,
+      "FlashSize": 2048,
+      "FlashChipId": "1540A1",
+      "FlashMode": "DOUT"
+    },
+    "StatusPRM": {
+      "CfgHolder": 4617,
+      "BootCount": 1,
+      "OtaUrl": "http://ota.tasmota.com/tasmota/release/tasmota.bin.gz"
+    },
+    "StatusSTS": {
+      "UptimeSec": 3600,
+      "POWER": "OFF",
+      "Heap": 23
+    }
+  },
+  "extras_sanitised": {
+    "Module": {"Module": {"0": "Athom Plug V2"}},
+    "Template": {
+      "NAME": "Athom Plug V2",
+      "ARCH": "ESP8266",
+      "GPIO": [0, 0, 0, 3104, 0, 32, 0, 0, 224, 576, 0, 0, 0, 0],
+      "FLAG": 0,
+      "BASE": 18
+    },
+    "SetOption65": {"SetOption65": "OFF"},
+    "DeviceName": {"DeviceName": "ExamplePlug"},
+    "PowerOnState": {"PowerOnState": 3},
+    "POWER": {"POWER": "OFF"},
+    "OtaUrl": {"OtaUrl": "http://ota.tasmota.com/tasmota/release/tasmota.bin.gz"}
+  }
+}
