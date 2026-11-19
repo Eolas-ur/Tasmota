@@ -24,4 +24,10 @@ Produces:
 `framework_overlay/` is generated at build and gitignored. The global PlatformIO
 `framework-arduinoespressif8266` package is never modified.
 
+## Certificate trust (lab only)
+
+Generated certs are **self-signed** EC P-256 with SANs (`tasmota-https-feasibility.local`,
+`localhost`, `127.0.0.1`). Browsers and strict TLS clients will not trust them without an
+explicit exception. Do not treat these as production credentials.
+
 Do not flash the managed Athom plug at 172.18.10.69 with this image.

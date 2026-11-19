@@ -1255,7 +1255,12 @@ void WSContentEnd(void) {
   // Fix UDP response #23613
   if (Webserver->isChunked()) {
     const char *footer_empty = "0\r\n\r\n";
-    Webserver->client().write(reinterpret_cast<const uint8_t *>(footer_empty), 5);  // Signal end of chunked content in one write (doesn't clear core _chunked)
+#ifdef USE_WEBSERVER_HTTPS
+    // BearSSL WiFiClientSecure::write(const char*) writes strlen; use explicit length.
+    Webserver->client().write(reinterpret_cast<const uint8_t *>(footer_empty), 5);
+#else
+    Webserver->client().write(footer_empty, 5);  // Signal end of chunked content in one write (doesn't clear core _chunked)
+#endif
 
     delay(5);
   }

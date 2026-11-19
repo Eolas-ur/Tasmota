@@ -1,4 +1,4 @@
-# Pure transform helpers for M5-00D BearSSL server security overlay.
+# Pure transform helpers for M5-00D/G BearSSL server security + TLS checkpoints.
 # No PlatformIO imports — safe for offline unit tests.
 #
 # Upstream WiFiClientSecureBearSSL.cpp is LGPL-2.1-or-later
@@ -57,28 +57,134 @@ SERVER_BASE_INIT_NEW = """  // M5-00D HTTPS feasibility overlay: TLS 1.2 only; r
 #endif
   }"""
 
-EC_INIT_OLD = """  br_ssl_server_base_init(_sc_svr.get(), suites_server_ec_P, sizeof(suites_server_ec_P) / sizeof(suites_server_ec_P[0]));
+CONNECT_EC_OLD = """bool WiFiClientSecure::_connectSSLServerEC(const X509List *chain,
+    unsigned cert_issuer_key_type, const PrivateKey *sk,
+    const X509List *client_CA_ta) {
+#ifndef BEARSSL_SSL_BASIC
+  _freeSSL();
+  _oom_err = false;
+  _sc_svr = std::make_shared<br_ssl_server_context>();
+  _eng = &_sc_svr->eng; // Allocation/deallocation taken care of by the _sc shared_ptr
+  _iobuf_in = std::shared_ptr<unsigned char>(new unsigned char[_iobuf_in_size], std::default_delete<unsigned char[]>());
+  _iobuf_out = std::shared_ptr<unsigned char>(new unsigned char[_iobuf_out_size], std::default_delete<unsigned char[]>());
+
+  if (!_sc_svr || !_iobuf_in || !_iobuf_out) {
+    _freeSSL();
+    _oom_err = true;
+    DEBUG_BSSL("_connectSSLServerEC: OOM error\\n");
+    return false;
+  }
+
+  br_ssl_server_base_init(_sc_svr.get(), suites_server_ec_P, sizeof(suites_server_ec_P) / sizeof(suites_server_ec_P[0]));
   br_ssl_server_set_single_ec(_sc_svr.get(), chain ? chain->getX509Certs() : nullptr, chain ? chain->getCount() : 0,
                                sk ? sk->getEC() : nullptr, BR_KEYTYPE_KEYX | BR_KEYTYPE_SIGN,
-                               cert_issuer_key_type, br_ssl_engine_get_ec(_eng), br_ecdsa_i15_sign_asn1);"""
+                               cert_issuer_key_type, br_ssl_engine_get_ec(_eng), br_ecdsa_i15_sign_asn1);
+  br_ssl_engine_set_buffers_bidi(_eng, _iobuf_in.get(), _iobuf_in_size, _iobuf_out.get(), _iobuf_out_size);
+  if (client_CA_ta && !_installServerX509Validator(client_CA_ta)) {
+    DEBUG_BSSL("_connectSSLServerEC: Can't install serverX509check\\n");
+    return false;
+  }
+  if (!br_ssl_server_reset(_sc_svr.get())) {
+    _freeSSL();
+    DEBUG_BSSL("_connectSSLServerEC: Can't reset server ctx\\n");
+    return false;
+  }
 
-EC_INIT_NEW = """  // M5-00D: ECDHE-ECDSA AES-128-GCM only (no CBC/3DES/static-ECDH from suites_server_ec_P).
+  return _wait_for_handshake();
+#else
+  (void) chain;
+  (void) cert_issuer_key_type;
+  (void) sk;
+  (void) client_CA_ta;
+  DEBUG_BSSL("_connectSSLServerEC: Attempting to use EC cert in minimal cipher mode (no EC)\\n");
+  return false;
+#endif
+}"""
+
+CONNECT_EC_NEW = """bool WiFiClientSecure::_connectSSLServerEC(const X509List *chain,
+    unsigned cert_issuer_key_type, const PrivateKey *sk,
+    const X509List *client_CA_ta) {
+#ifndef BEARSSL_SSL_BASIC
+  // M5-00G: lightweight TLS lifecycle checkpoints (no logging here).
+  // Stages: 0 before alloc, 1 after iobuf, 2 after engine reset, 3 after handshake.
+  HttpsFeasibilityTlsCkpt(0, 0);
+  HttpsFeasibilityTlsAcceptErr = 0;
+  _freeSSL();
+  _oom_err = false;
+  _sc_svr = std::make_shared<br_ssl_server_context>();
+  _eng = &_sc_svr->eng; // Allocation/deallocation taken care of by the _sc shared_ptr
+  _iobuf_in = std::shared_ptr<unsigned char>(new unsigned char[_iobuf_in_size], std::default_delete<unsigned char[]>());
+  _iobuf_out = std::shared_ptr<unsigned char>(new unsigned char[_iobuf_out_size], std::default_delete<unsigned char[]>());
+
+  if (!_sc_svr || !_iobuf_in || !_iobuf_out) {
+    _freeSSL();
+    _oom_err = true;
+    HttpsFeasibilityTlsAcceptErr = -1000;
+    HttpsFeasibilityTlsCkpt(1, -1000);
+    DEBUG_BSSL("_connectSSLServerEC: OOM error\\n");
+    return false;
+  }
+  HttpsFeasibilityTlsCkpt(1, 0);
+
+  // M5-00D: ECDHE-ECDSA AES-128-GCM only (no CBC/3DES/static-ECDH from suites_server_ec_P).
   static const uint16_t suites_server_ec_secure_P[] PROGMEM = {
     BR_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
   };
   br_ssl_server_base_init(_sc_svr.get(), suites_server_ec_secure_P, sizeof(suites_server_ec_secure_P) / sizeof(suites_server_ec_secure_P[0]));
   br_ssl_server_set_single_ec(_sc_svr.get(), chain ? chain->getX509Certs() : nullptr, chain ? chain->getCount() : 0,
                                sk ? sk->getEC() : nullptr, BR_KEYTYPE_KEYX | BR_KEYTYPE_SIGN,
-                               cert_issuer_key_type, br_ssl_engine_get_ec(_eng), br_ecdsa_i15_sign_asn1);"""
+                               cert_issuer_key_type, br_ssl_engine_get_ec(_eng), br_ecdsa_i15_sign_asn1);
+  br_ssl_engine_set_buffers_bidi(_eng, _iobuf_in.get(), _iobuf_in_size, _iobuf_out.get(), _iobuf_out_size);
+  if (client_CA_ta && !_installServerX509Validator(client_CA_ta)) {
+    HttpsFeasibilityTlsAcceptErr = br_ssl_engine_last_error(_eng);
+    HttpsFeasibilityTlsCkpt(2, HttpsFeasibilityTlsAcceptErr);
+    DEBUG_BSSL("_connectSSLServerEC: Can't install serverX509check\\n");
+    return false;
+  }
+  if (!br_ssl_server_reset(_sc_svr.get())) {
+    HttpsFeasibilityTlsAcceptErr = br_ssl_engine_last_error(_eng);
+    HttpsFeasibilityTlsCkpt(2, HttpsFeasibilityTlsAcceptErr);
+    _freeSSL();
+    DEBUG_BSSL("_connectSSLServerEC: Can't reset server ctx\\n");
+    return false;
+  }
+  HttpsFeasibilityTlsCkpt(2, 0);
+
+  bool hs_ok = _wait_for_handshake();
+  if (!hs_ok) {
+    HttpsFeasibilityTlsAcceptErr = _oom_err ? -1000 : br_ssl_engine_last_error(_eng);
+  } else {
+    HttpsFeasibilityTlsAcceptErr = 0;
+  }
+  HttpsFeasibilityTlsCkpt(3, HttpsFeasibilityTlsAcceptErr);
+  return hs_ok;
+#else
+  (void) chain;
+  (void) cert_issuer_key_type;
+  (void) sk;
+  (void) client_CA_ta;
+  HttpsFeasibilityTlsAcceptErr = -1001;
+  HttpsFeasibilityTlsCkpt(3, -1001);
+  DEBUG_BSSL("_connectSSLServerEC: Attempting to use EC cert in minimal cipher mode (no EC)\\n");
+  return false;
+#endif
+}"""
 
 OVERLAY_BANNER = """/*
- * M5-00D GENERATED OVERLAY — do not edit by hand.
+ * M5-00D/G GENERATED OVERLAY — do not edit by hand.
  * Source: framework-arduinoespressif8266 2.8.0 WiFiClientSecureBearSSL.cpp
  * Expected SHA256: {sha}
  * Policy: TLS 1.2 only; server EC suite ECDHE-ECDSA-AES128-GCM-SHA256 only.
+ * M5-00G: TLS lifecycle checkpoints via HttpsFeasibilityTlsCkpt / TlsAcceptErr.
  * Wired only into env:tasmota-https-feasibility via bearssl_server_secure_overlay.py
  * License: LGPL-2.1-or-later (original Arduino-ESP8266 / Earle F. Philhower, III)
  */
+
+#include <stdint.h>
+// Provided by tasmota/tasmota_support/https_feasibility.ino (USE_WEBSERVER_HTTPS builds).
+extern "C" void HttpsFeasibilityTlsCkpt(uint8_t stage, int32_t detail);
+extern "C" int HttpsFeasibilityTlsAcceptErr;
+
 """
 
 
@@ -93,15 +199,15 @@ def sha256_file(path: pathlib.Path) -> str:
 def transform(source: str) -> str:
     if SERVER_BASE_INIT_OLD not in source:
         raise RuntimeError("Pinned WiFiClientSecureBearSSL.cpp: server base init block not found")
-    if EC_INIT_OLD not in source:
-        raise RuntimeError("Pinned WiFiClientSecureBearSSL.cpp: EC server init block not found")
+    if CONNECT_EC_OLD not in source:
+        raise RuntimeError("Pinned WiFiClientSecureBearSSL.cpp: _connectSSLServerEC block not found")
     if source.count(SERVER_BASE_INIT_OLD) != 1:
         raise RuntimeError("Pinned WiFiClientSecureBearSSL.cpp: unexpected duplicate server base init")
-    if source.count(EC_INIT_OLD) != 1:
-        raise RuntimeError("Pinned WiFiClientSecureBearSSL.cpp: unexpected duplicate EC server init")
+    if source.count(CONNECT_EC_OLD) != 1:
+        raise RuntimeError("Pinned WiFiClientSecureBearSSL.cpp: unexpected duplicate _connectSSLServerEC")
 
     out = source.replace(SERVER_BASE_INIT_OLD, SERVER_BASE_INIT_NEW, 1)
-    out = out.replace(EC_INIT_OLD, EC_INIT_NEW, 1)
+    out = out.replace(CONNECT_EC_OLD, CONNECT_EC_NEW, 1)
 
     if "br_ssl_engine_set_versions(&cc->eng, BR_TLS10, BR_TLS12);" not in out:
         raise RuntimeError("Client TLS version line missing after transform — aborting")
@@ -111,8 +217,9 @@ def transform(source: str) -> str:
         raise RuntimeError("Secure EC suite table missing after transform — aborting")
     if "br_ssl_server_base_init(_sc_svr.get(), suites_server_ec_P," in out:
         raise RuntimeError("Unrestricted suites_server_ec_P still used for EC server path")
+    if "HttpsFeasibilityTlsCkpt(0, 0);" not in out:
+        raise RuntimeError("TLS checkpoint hooks missing after transform")
 
-    # Server base init must not mention weak protocol/primitive installs.
     start = out.index("M5-00D HTTPS feasibility overlay")
     end = out.index("\n  }", start)
     server_fn = out[start:end]

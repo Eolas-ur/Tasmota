@@ -64,6 +64,12 @@ class TestBearSSLServerOverlay(unittest.TestCase):
         )
         # Client path untouched
         self.assertIn("br_ssl_engine_set_versions(&cc->eng, BR_TLS10, BR_TLS12);", out)
+        # M5-00G TLS lifecycle checkpoints
+        self.assertIn("HttpsFeasibilityTlsCkpt(0, 0);", out)
+        self.assertIn("HttpsFeasibilityTlsCkpt(1, 0);", out)
+        self.assertIn("HttpsFeasibilityTlsCkpt(2, 0);", out)
+        self.assertIn("HttpsFeasibilityTlsCkpt(3,", out)
+        self.assertIn("HttpsFeasibilityTlsAcceptErr", out)
 
     def test_secure_server_init_omits_weak_primitives(self):
         out = transform(self.src.read_text(encoding="utf-8"))
@@ -86,9 +92,10 @@ class TestBearSSLServerOverlay(unittest.TestCase):
             dest = pathlib.Path(tmp) / "WiFiClientSecureBearSSL.cpp"
             generate_overlay(self.src, dest)
             body = dest.read_text(encoding="utf-8")
-            self.assertTrue(body.startswith("/*\n * M5-00D GENERATED OVERLAY"))
+            self.assertTrue(body.startswith("/*\n * M5-00D/G GENERATED OVERLAY"))
             self.assertIn("TLS 1.2 only", body)
             self.assertIn("suites_server_ec_secure_P", body)
+            self.assertIn("HttpsFeasibilityTlsCkpt", body)
 
 
 if __name__ == "__main__":

@@ -22,14 +22,14 @@
 
 #ifdef ESP8266
 #ifdef USE_WEBSERVER_HTTPS
-#include <ESP8266WebServerSecure.h>
+#include "tasmota_support/https_feasibility.h"
 
-// Feasibility-only: inherit BearSSL secure server template.
+// Feasibility-only: HTTPS webserver template over instrumented WiFiServerSecure.
 // Not enabled in production envs. Manager/captive HTTP is not preserved under this gate.
-class TasmotaWebServer : public BearSSL::ESP8266WebServerSecure
+class TasmotaWebServer : public HttpsFeasibilityWebServer
 {
 public:
-	TasmotaWebServer(int port) : BearSSL::ESP8266WebServerSecure(port)
+	TasmotaWebServer(int port) : HttpsFeasibilityWebServer(port)
 	{
 	}
 
