@@ -62,6 +62,10 @@ const uint16_t HTTP_OTA_RESTART_RECONNECT_TIME = 10000;  // milliseconds - Allow
 
 #include "TasmotaWebServer.h"
 #include <DNSServer.h>
+#ifdef USE_WEBSERVER_HTTPS
+#include "tasmota_support/https_feasibility.h"
+#endif  // USE_WEBSERVER_HTTPS
+
 
 #ifdef USE_UNISHOX_COMPRESSION
   #include "./html_compressed/HTTP_HEADER1_ES6.h"
@@ -663,7 +667,17 @@ void StartWebserver(int type) {
     }
 
     if (!Webserver) {
+#ifdef USE_WEBSERVER_HTTPS
+      // Feasibility build: TLS listener replaces plain WEB_PORT. Captive-manager
+      // still requests port 80 but the socket is TLS (manager UX not validated here).
+      const int https_port = (HTTP_MANAGER == type || HTTP_MANAGER_RESET_ONLY == type) ? 80 : HTTPS_FEASIBILITY_PORT;
+      Webserver = new TasmotaWebServer(https_port);
+      if (!HttpsFeasibilityConfigureServer(Webserver)) {
+        AddLog(LOG_LEVEL_ERROR, PSTR(D_LOG_HTTP "HTTPS feasibility configure failed"));
+      }
+#else
       Webserver = new TasmotaWebServer((HTTP_MANAGER == type || HTTP_MANAGER_RESET_ONLY == type) ? 80 : WEB_PORT);
+#endif  // USE_WEBSERVER_HTTPS
 
       const char* headerkeys[] = { "Referer", "Host" };
       size_t headerkeyssize = sizeof(headerkeys) / sizeof(char*);
@@ -1226,7 +1240,8 @@ void WSContentEnd(void) {
   // Fix UDP response #23613
   if (Webserver->isChunked()) {
     const char *footer_empty = "0\r\n\r\n";
-    Webserver->client().write(footer_empty, 5);      // Signal end of chunked content in one write (doesn't clear core _chunked)
+    Webserver->client().write(reinterpret_cast<const uint8_t *>(footer_empty), 5);  // Signal end of chunked content in one write (doesn't clear core _chunked)
+
     delay(5);
   }
 

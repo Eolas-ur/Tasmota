@@ -69,3 +69,6 @@ tasmota-qemu
 # Local ESP-IDF build files, not tracked
 /sdkconfig.defaults
 /CMakeLists.txt
+
+# M5-00B non-production HTTPS certs/keys (keep README tracked)
+https_feasibility_local/certs/

@@ -21,6 +21,21 @@
 #define __TASMOTA_WEBSERVER__
 
 #ifdef ESP8266
+#ifdef USE_WEBSERVER_HTTPS
+#include <ESP8266WebServerSecure.h>
+
+// Feasibility-only: inherit BearSSL secure server template.
+// Not enabled in production envs. Manager/captive HTTP is not preserved under this gate.
+class TasmotaWebServer : public BearSSL::ESP8266WebServerSecure
+{
+public:
+	TasmotaWebServer(int port) : BearSSL::ESP8266WebServerSecure(port)
+	{
+	}
+
+  bool isChunked(void) const { return _chunked; }
+};
+#else
 #include <ESP8266WebServer.h>
 
 class TasmotaWebServer : public ESP8266WebServer
@@ -32,6 +47,7 @@ public:
 
   bool isChunked(void) const { return _chunked; }
 };
+#endif // USE_WEBSERVER_HTTPS
 #endif // ESP8266
 
 #ifdef ESP32
