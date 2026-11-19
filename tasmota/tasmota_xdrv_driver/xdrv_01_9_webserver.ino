@@ -671,10 +671,17 @@ void StartWebserver(int type) {
       // Feasibility build: TLS listener replaces plain WEB_PORT. Captive-manager
       // still requests port 80 but the socket is TLS (manager UX not validated here).
       const int https_port = (HTTP_MANAGER == type || HTTP_MANAGER_RESET_ONLY == type) ? 80 : HTTPS_FEASIBILITY_PORT;
+      const uint32_t https_heap_before = ESP.getFreeHeap();
       Webserver = new TasmotaWebServer(https_port);
       if (!HttpsFeasibilityConfigureServer(Webserver)) {
-        AddLog(LOG_LEVEL_ERROR, PSTR(D_LOG_HTTP "HTTPS feasibility configure failed"));
+        AddLog(LOG_LEVEL_ERROR, PSTR(D_LOG_HTTP "HTTPS feasibility configure failed — not starting listener"));
+        delete Webserver;
+        Webserver = nullptr;
+        return;  // Fail closed: leave Web.state unchanged (no TLS-without-key socket)
       }
+#if HTTPS_FEASIBILITY_INSTRUMENT
+      HttpsFeasibilityNoteInitHeaps(https_heap_before, ESP.getFreeHeap());
+#endif
 #else
       Webserver = new TasmotaWebServer((HTTP_MANAGER == type || HTTP_MANAGER_RESET_ONLY == type) ? 80 : WEB_PORT);
 #endif  // USE_WEBSERVER_HTTPS
@@ -783,7 +790,15 @@ void WifiManagerBegin(bool reset_only) {
 
 void PollDnsWebserver(void) {
   if (DnsServer) { DnsServer->processNextRequest(); }
-  if (Webserver && Web.state) { Webserver->handleClient(); }   // handleClient() costs a delay(1)
+  if (Webserver && Web.state) {
+#if defined(USE_WEBSERVER_HTTPS) && HTTPS_FEASIBILITY_INSTRUMENT
+    HttpsFeasibilityBeforeHandleClient(Webserver);
+#endif
+    Webserver->handleClient();   // handleClient() costs a delay(1); TLS handshake runs inside available()
+#if defined(USE_WEBSERVER_HTTPS) && HTTPS_FEASIBILITY_INSTRUMENT
+    HttpsFeasibilityAfterHandleClient(Webserver);
+#endif
+  }
 }
 
 /*********************************************************************************************/
@@ -4859,6 +4874,12 @@ bool Xdrv01(uint32_t function) {
       break;
 #ifndef FIRMWARE_MINIMAL
     case FUNC_COMMAND:
+#if defined(USE_WEBSERVER_HTTPS) && HTTPS_FEASIBILITY_INSTRUMENT
+      if (HttpsFeasibilityCmnd()) {
+        result = true;
+        break;
+      }
+#endif
       result = DecodeCommand(kWebCommands, WebCommand);
       break;
 #endif  // FIRMWARE_MINIMAL

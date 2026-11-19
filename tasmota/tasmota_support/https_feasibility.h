@@ -3,6 +3,11 @@
 
   Enabled only with -DUSE_WEBSERVER_HTTPS on env:tasmota-https-feasibility.
   Certificates are supplied via an external include path (not tracked in Git).
+
+  Security note (pinned framework-arduinoespressif8266 2.8.0):
+  - Server handshake hardcodes br_ssl_engine_set_versions(BR_TLS10, BR_TLS12).
+  - EC server cipher list includes CBC and 3DES suites; setCiphers() is client-only.
+  - No public API to enforce TLS 1.2-only or restrict server suites without a core patch.
 */
 
 #ifndef HTTPS_FEASIBILITY_H
@@ -12,8 +17,7 @@
 #ifdef ESP8266
 
 // Default BearSSL server RX is BR_SSL_BUFSIZE_INPUT (16384+325).
-// These values are compile-time knobs for size/RAM experiments; runtime safety
-// of reduced RX vs browser record sizes is NOT established by compilation alone.
+// WiFiServerSecure::setBufferSizes stores raw sizes (no +325/+85 overhead).
 #ifndef HTTPS_FEASIBILITY_RX_BUF
 #define HTTPS_FEASIBILITY_RX_BUF  4096
 #endif
@@ -24,13 +28,25 @@
 #define HTTPS_FEASIBILITY_PORT  443
 #endif
 
+// Runtime diagnostics (serial AddLog only; no secrets).
+#ifndef HTTPS_FEASIBILITY_INSTRUMENT
+#define HTTPS_FEASIBILITY_INSTRUMENT  1
+#endif
+
 #include <ESP8266WebServerSecure.h>
 #include <BearSSLHelpers.h>
 
-// External non-production cert header (build_flags -I .../certs).
 #include "https_feasibility_certs.h"
 
 bool HttpsFeasibilityConfigureServer(BearSSL::ESP8266WebServerSecure *server);
+
+#if HTTPS_FEASIBILITY_INSTRUMENT
+void HttpsFeasibilityNoteInitHeaps(uint32_t heap_before, uint32_t heap_after);
+void HttpsFeasibilityBeforeHandleClient(BearSSL::ESP8266WebServerSecure *server);
+void HttpsFeasibilityAfterHandleClient(BearSSL::ESP8266WebServerSecure *server);
+bool HttpsFeasibilityCmnd(void);
+void HttpsFeasibilityLogBootOnce(void);
+#endif
 
 #endif  // ESP8266
 #endif  // USE_WEBSERVER_HTTPS
