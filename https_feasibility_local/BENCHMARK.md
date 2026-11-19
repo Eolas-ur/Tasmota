@@ -1,4 +1,4 @@
-# HTTPS runtime benchmark procedure (M5-00C/D/G)
+# HTTPS runtime benchmark procedure (M5-00C/D/G/H)
 
 **Do not run against the Athom plug at 172.18.10.69.**  
 Use a USB-powered ESP8266/ESP8285 development board with serial access.
@@ -7,9 +7,10 @@ Use a USB-powered ESP8266/ESP8285 development board with serial access.
 
 | Class | Meaning |
 |-------|---------|
-| TLS transport failure | Handshake/alert/timeout; device stays up; `HttpsMetrics` `HsFail` increases |
-| HTTP application failure | TLS OK (`HsOk`) but UI/API/upload fails; `HttpSeen` may still increase |
-| Unknown TLS outcome | No client / no SSL error captured; counted as `HsUnknown` (not success) |
+| TLS handshake failure | `_wait_for_handshake()` failed or early TLS setup fail; `HsFail` increases |
+| TLS handshake success | Overlay sets `HttpsFeasibilityTlsHsOk=1`; `HsOk` increases even if TCP drops immediately |
+| HTTP application failure | TLS OK (`HsOk`) but UI/API/upload fails; `HttpClientPolls` may still increase |
+| Unknown TLS outcome | No TLS attempt observed (`HsOk` unset); `HsUnknown` (not success) |
 | Firmware / device failure | WDT, abort, reboot, hang; check `HTTPS: boot reset=` after reconnect |
 
 ## Memory measurement (M5-00G)
@@ -28,7 +29,8 @@ HttpsMetrics
 ```
 
 Fields of interest: `HsOk`, `HsFail`, `HsUnknown`, `HsMs`/`HsMaxMs`, `LastSslErr`,
-`HttpSeen`, `HeapMinSampled`, `MaxBlockMin`, `PeakIsSampled`.
+`TransportConnected`, `HttpClientPolls` (webserver polls while a client remains
+connected — not HTTP request counts), `HeapMinSampled`, `MaxBlockMin`, `PeakIsSampled`.
 
 Logs also emit `HTTPS:` lines for init, handshake ok/fail, and disconnect heap recovery.
 
@@ -39,7 +41,7 @@ python -m pytest https_feasibility_local/tests/ -v
 ```
 
 Confirms the M5-00D overlay transform enforces TLS 1.2 + ECDHE-ECDSA-AES128-GCM, and
-M5-00G counter/heap labelling contracts. **Does not prove wire behaviour.**
+M5-00G/H handshake classification contracts. **Does not prove wire behaviour.**
 
 ## Test matrix (lab board only)
 

@@ -71,6 +71,8 @@ bool HttpsFeasibilityConfigureServer(void *webserver);
 // Overlay TLS checkpoints (no logging inside BearSSL TU).
 extern "C" void HttpsFeasibilityTlsCkpt(uint8_t stage, int32_t detail);
 extern "C" int HttpsFeasibilityTlsAcceptErr;
+// Authoritative handshake outcome from overlay _wait_for_handshake(): -1 none, 0 fail, 1 ok.
+extern "C" int8_t HttpsFeasibilityTlsHsOk;
 
 #if HTTPS_FEASIBILITY_INSTRUMENT
 void HttpsFeasibilityNoteInitHeaps(uint32_t heap_before, uint32_t heap_after);

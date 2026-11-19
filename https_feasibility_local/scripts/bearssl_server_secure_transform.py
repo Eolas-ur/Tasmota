@@ -105,10 +105,12 @@ CONNECT_EC_NEW = """bool WiFiClientSecure::_connectSSLServerEC(const X509List *c
     unsigned cert_issuer_key_type, const PrivateKey *sk,
     const X509List *client_CA_ta) {
 #ifndef BEARSSL_SSL_BASIC
-  // M5-00G: lightweight TLS lifecycle checkpoints (no logging here).
+  // M5-00G/H: lightweight TLS lifecycle checkpoints (no logging here).
   // Stages: 0 before alloc, 1 after iobuf, 2 after engine reset, 3 after handshake.
+  // HttpsFeasibilityTlsHsOk: -1 none, 0 fail, 1 success (authoritative vs connected()).
   HttpsFeasibilityTlsCkpt(0, 0);
   HttpsFeasibilityTlsAcceptErr = 0;
+  HttpsFeasibilityTlsHsOk = -1;
   _freeSSL();
   _oom_err = false;
   _sc_svr = std::make_shared<br_ssl_server_context>();
@@ -120,6 +122,7 @@ CONNECT_EC_NEW = """bool WiFiClientSecure::_connectSSLServerEC(const X509List *c
     _freeSSL();
     _oom_err = true;
     HttpsFeasibilityTlsAcceptErr = -1000;
+    HttpsFeasibilityTlsHsOk = 0;
     HttpsFeasibilityTlsCkpt(1, -1000);
     DEBUG_BSSL("_connectSSLServerEC: OOM error\\n");
     return false;
@@ -137,12 +140,14 @@ CONNECT_EC_NEW = """bool WiFiClientSecure::_connectSSLServerEC(const X509List *c
   br_ssl_engine_set_buffers_bidi(_eng, _iobuf_in.get(), _iobuf_in_size, _iobuf_out.get(), _iobuf_out_size);
   if (client_CA_ta && !_installServerX509Validator(client_CA_ta)) {
     HttpsFeasibilityTlsAcceptErr = br_ssl_engine_last_error(_eng);
+    HttpsFeasibilityTlsHsOk = 0;
     HttpsFeasibilityTlsCkpt(2, HttpsFeasibilityTlsAcceptErr);
     DEBUG_BSSL("_connectSSLServerEC: Can't install serverX509check\\n");
     return false;
   }
   if (!br_ssl_server_reset(_sc_svr.get())) {
     HttpsFeasibilityTlsAcceptErr = br_ssl_engine_last_error(_eng);
+    HttpsFeasibilityTlsHsOk = 0;
     HttpsFeasibilityTlsCkpt(2, HttpsFeasibilityTlsAcceptErr);
     _freeSSL();
     DEBUG_BSSL("_connectSSLServerEC: Can't reset server ctx\\n");
@@ -153,8 +158,10 @@ CONNECT_EC_NEW = """bool WiFiClientSecure::_connectSSLServerEC(const X509List *c
   bool hs_ok = _wait_for_handshake();
   if (!hs_ok) {
     HttpsFeasibilityTlsAcceptErr = _oom_err ? -1000 : br_ssl_engine_last_error(_eng);
+    HttpsFeasibilityTlsHsOk = 0;
   } else {
     HttpsFeasibilityTlsAcceptErr = 0;
+    HttpsFeasibilityTlsHsOk = 1;
   }
   HttpsFeasibilityTlsCkpt(3, HttpsFeasibilityTlsAcceptErr);
   return hs_ok;
@@ -164,6 +171,7 @@ CONNECT_EC_NEW = """bool WiFiClientSecure::_connectSSLServerEC(const X509List *c
   (void) sk;
   (void) client_CA_ta;
   HttpsFeasibilityTlsAcceptErr = -1001;
+  HttpsFeasibilityTlsHsOk = 0;
   HttpsFeasibilityTlsCkpt(3, -1001);
   DEBUG_BSSL("_connectSSLServerEC: Attempting to use EC cert in minimal cipher mode (no EC)\\n");
   return false;
@@ -171,11 +179,11 @@ CONNECT_EC_NEW = """bool WiFiClientSecure::_connectSSLServerEC(const X509List *c
 }"""
 
 OVERLAY_BANNER = """/*
- * M5-00D/G GENERATED OVERLAY — do not edit by hand.
+ * M5-00D/G/H GENERATED OVERLAY — do not edit by hand.
  * Source: framework-arduinoespressif8266 2.8.0 WiFiClientSecureBearSSL.cpp
  * Expected SHA256: {sha}
  * Policy: TLS 1.2 only; server EC suite ECDHE-ECDSA-AES128-GCM-SHA256 only.
- * M5-00G: TLS lifecycle checkpoints via HttpsFeasibilityTlsCkpt / TlsAcceptErr.
+ * M5-00G/H: TLS checkpoints + HttpsFeasibilityTlsHsOk from _wait_for_handshake().
  * Wired only into env:tasmota-https-feasibility via bearssl_server_secure_overlay.py
  * License: LGPL-2.1-or-later (original Arduino-ESP8266 / Earle F. Philhower, III)
  */
@@ -184,6 +192,7 @@ OVERLAY_BANNER = """/*
 // Provided by tasmota/tasmota_support/https_feasibility.ino (USE_WEBSERVER_HTTPS builds).
 extern "C" void HttpsFeasibilityTlsCkpt(uint8_t stage, int32_t detail);
 extern "C" int HttpsFeasibilityTlsAcceptErr;
+extern "C" int8_t HttpsFeasibilityTlsHsOk;  /* -1 none, 0 fail, 1 ok */
 
 """
 
@@ -219,6 +228,10 @@ def transform(source: str) -> str:
         raise RuntimeError("Unrestricted suites_server_ec_P still used for EC server path")
     if "HttpsFeasibilityTlsCkpt(0, 0);" not in out:
         raise RuntimeError("TLS checkpoint hooks missing after transform")
+    if "HttpsFeasibilityTlsHsOk = 1;" not in out:
+        raise RuntimeError("Authoritative handshake-ok assignment missing after transform")
+    if "bool hs_ok = _wait_for_handshake();" not in out:
+        raise RuntimeError("_wait_for_handshake result capture missing after transform")
 
     start = out.index("M5-00D HTTPS feasibility overlay")
     end = out.index("\n  }", start)

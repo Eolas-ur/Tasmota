@@ -1,9 +1,9 @@
 /*
   https_feasibility.ino - BearSSL HTTPS feasibility configuration + instrumentation.
 
-  M5-00G: handshake success/fail/duration come from WiFiServerSecure::available()
-  wrapping the TLS accept path, with heap samples at overlay TLS checkpoints.
-  Heap "min" values are sampled at checkpoints — not an allocator high-water mark.
+  M5-00H: HsOk/HsFail come from overlay HttpsFeasibilityTlsHsOk (set from
+  _wait_for_handshake()), not from client.connected(). Transport connection
+  state is recorded separately. Heap mins remain sampled checkpoints.
 */
 
 #ifdef USE_WEBSERVER_HTTPS
@@ -16,6 +16,7 @@ static BearSSL::PrivateKey *HttpsFeasibilityKey = nullptr;
 static bool HttpsFeasibilityReady = false;
 
 extern "C" int HttpsFeasibilityTlsAcceptErr = 0;
+extern "C" int8_t HttpsFeasibilityTlsHsOk = -1;
 
 #if HTTPS_FEASIBILITY_INSTRUMENT
 
@@ -44,9 +45,10 @@ struct HttpsFeasibilityMetrics {
   uint32_t hs_ok;
   uint32_t hs_fail;
   uint32_t hs_unknown;
-  uint32_t http_seen;                // handleClient observed an active TLS client
+  uint32_t http_client_polls;        // handleClient polls while client.connected()
   int32_t  last_ssl_error;
   uint32_t disconnects;
+  bool     last_transport_connected; // transport state at accept-end (not HS proof)
   bool     client_was_connected;
   bool     boot_logged;
   bool     accept_in_progress;
@@ -127,6 +129,7 @@ void HttpsFeasibilityOnAcceptBegin(void) {
   HttpsMetrics.accept_in_progress = true;
   HttpsMetrics.accept_start_ms = millis();
   HttpsFeasibilityTlsAcceptErr = 0;
+  HttpsFeasibilityTlsHsOk = -1;
 }
 
 void HttpsFeasibilityOnAcceptEnd(BearSSL::WiFiClientSecure &client) {
@@ -141,18 +144,23 @@ void HttpsFeasibilityOnAcceptEnd(BearSSL::WiFiClientSecure &client) {
     HttpsMetrics.hs_duration_max_ms = dur;
   }
 
-  const bool connected = client.connected();
+  // Transport state is informational only — not proof of handshake success.
+  HttpsMetrics.last_transport_connected = client.connected();
+
   int err = HttpsFeasibilityTlsAcceptErr;
-  if (err == 0) {
+  if ((err == 0) && (HttpsFeasibilityTlsHsOk == 0)) {
     err = client.getLastSSLError();
   }
   HttpsMetrics.last_ssl_error = err;
 
-  if (connected && (err == 0)) {
+  // Authoritative outcome: overlay result of _wait_for_handshake() / early TLS fail.
+  const int8_t hs = HttpsFeasibilityTlsHsOk;
+  if (hs == 1) {
     HttpsMetrics.hs_ok++;
     AddLog(LOG_LEVEL_INFO,
-           PSTR("HTTPS: hs ok ms=%u heap_samp before=%u iobuf=%u eng=%u after=%u min_samp=%u max_block_min=%u ok=%u"),
+           PSTR("HTTPS: hs ok ms=%u transport=%u heap_samp before=%u iobuf=%u eng=%u after=%u min_samp=%u max_block_min=%u ok=%u"),
            dur,
+           HttpsMetrics.last_transport_connected ? 1 : 0,
            HttpsMetrics.heap_before_accept,
            HttpsMetrics.heap_ckpt_after_iobuf,
            HttpsMetrics.heap_ckpt_after_engine,
@@ -160,31 +168,25 @@ void HttpsFeasibilityOnAcceptEnd(BearSSL::WiFiClientSecure &client) {
            HttpsMetrics.heap_min_sampled,
            HttpsMetrics.max_free_block_min,
            HttpsMetrics.hs_ok);
-  } else if (!connected && (err != 0)) {
+  } else if (hs == 0) {
     HttpsMetrics.hs_fail++;
     AddLog(LOG_LEVEL_INFO,
-           PSTR("HTTPS: hs fail err=%d ms=%u heap_samp before=%u after=%u min_samp=%u fail=%u"),
+           PSTR("HTTPS: hs fail err=%d ms=%u transport=%u heap_samp before=%u after=%u min_samp=%u fail=%u"),
            err,
            dur,
+           HttpsMetrics.last_transport_connected ? 1 : 0,
            HttpsMetrics.heap_before_accept,
            HttpsMetrics.heap_after_hs,
            HttpsMetrics.heap_min_sampled,
            HttpsMetrics.hs_fail);
-  } else if (!connected && (err == 0)) {
-    // No pending TCP client, or outcome cleared before error capture.
+  } else {
+    // No TLS attempt observed (hasClient race / path without _connectSSLServerEC).
     HttpsMetrics.hs_unknown++;
     AddLog(LOG_LEVEL_DEBUG,
-           PSTR("HTTPS: hs unknown (no client/err) ms=%u unknown=%u"),
+           PSTR("HTTPS: hs unknown (no attempt) ms=%u transport=%u unknown=%u"),
            dur,
+           HttpsMetrics.last_transport_connected ? 1 : 0,
            HttpsMetrics.hs_unknown);
-  } else {
-    // connected but err != 0 — treat as failure once.
-    HttpsMetrics.hs_fail++;
-    AddLog(LOG_LEVEL_INFO,
-           PSTR("HTTPS: hs fail-connected err=%d ms=%u fail=%u"),
-           err,
-           dur,
-           HttpsMetrics.hs_fail);
   }
 }
 
@@ -200,7 +202,7 @@ void HttpsFeasibilityAfterHandleClient(void *webserver) {
 
   const bool connected = server->client().connected();
   if (connected) {
-    HttpsMetrics.http_seen++;
+    HttpsMetrics.http_client_polls++;
   }
 
   if (HttpsMetrics.client_was_connected && !connected) {
@@ -226,7 +228,7 @@ bool HttpsFeasibilityCmnd(void) {
          "\"HeapMinSampled\":%u,\"HeapAfterDisc\":%u,\"MaxBlockMin\":%u,\"FragMax\":%u,"
          "\"PeakIsSampled\":%u,"
          "\"HsMs\":%u,\"HsMaxMs\":%u,\"HsOk\":%u,\"HsFail\":%u,\"HsUnknown\":%u,"
-         "\"HttpSeen\":%u,\"LastSslErr\":%d,\"Disconnects\":%u,"
+         "\"HttpClientPolls\":%u,\"LastSslErr\":%d,\"TransportConnected\":%u,\"Disconnects\":%u,"
          "\"RxBuf\":%u,\"TxBuf\":%u}}"),
     HttpsMetrics.heap_before_init,
     HttpsMetrics.heap_after_init,
@@ -244,8 +246,9 @@ bool HttpsFeasibilityCmnd(void) {
     HttpsMetrics.hs_ok,
     HttpsMetrics.hs_fail,
     HttpsMetrics.hs_unknown,
-    HttpsMetrics.http_seen,
+    HttpsMetrics.http_client_polls,
     HttpsMetrics.last_ssl_error,
+    HttpsMetrics.last_transport_connected ? 1 : 0,
     HttpsMetrics.disconnects,
     (uint32_t)HTTPS_FEASIBILITY_RX_BUF,
     (uint32_t)HTTPS_FEASIBILITY_TX_BUF);
