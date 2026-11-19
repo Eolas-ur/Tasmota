@@ -72,3 +72,5 @@ tasmota-qemu
 
 # M5-00B non-production HTTPS certs/keys (keep README tracked)
 https_feasibility_local/certs/
+# M5-00D generated LGPL overlay (regenerated at build from pinned framework)
+https_feasibility_local/framework_overlay/

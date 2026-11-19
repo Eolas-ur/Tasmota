@@ -4,10 +4,9 @@
   Enabled only with -DUSE_WEBSERVER_HTTPS on env:tasmota-https-feasibility.
   Certificates are supplied via an external include path (not tracked in Git).
 
-  Security note (pinned framework-arduinoespressif8266 2.8.0):
-  - Server handshake hardcodes br_ssl_engine_set_versions(BR_TLS10, BR_TLS12).
-  - EC server cipher list includes CBC and 3DES suites; setCiphers() is client-only.
-  - No public API to enforce TLS 1.2-only or restrict server suites without a core patch.
+  Security (M5-00D): env:tasmota-https-feasibility applies a project-local overlay of
+  WiFiClientSecureBearSSL.cpp (TLS 1.2 only + ECDHE-ECDSA-AES128-GCM for EC server).
+  Stock pinned core still allows TLS 1.0-1.2 and CBC/3DES; ordinary builds are unchanged.
 */
 
 #ifndef HTTPS_FEASIBILITY_H

@@ -221,13 +221,16 @@ bool HttpsFeasibilityConfigureServer(BearSSL::ESP8266WebServerSecure *server) {
     }
     HttpsFeasibilityReady = true;
     AddLog(LOG_LEVEL_INFO,
-           PSTR("HTTPS: EC P-256 ready rx=%u tx=%u (core TLS1.0-1.2; no server cipher API; no session cache)"),
+           PSTR("HTTPS: EC P-256 ready rx=%u tx=%u (overlay TLS1.2 + ECDHE-ECDSA-AES128-GCM; no session cache)"),
            (uint32_t)HTTPS_FEASIBILITY_RX_BUF,
            (uint32_t)HTTPS_FEASIBILITY_TX_BUF);
   }
 
   // Pointers retained for server lifetime (required by WiFiServerSecure::setECCert).
   // stack_thunk_add_ref() runs in WiFiServerSecure ctor (6200-byte secondary stack).
+  // TLS version/cipher enforcement is in the M5-00D project-local framework overlay
+  // (https_feasibility_local/scripts/bearssl_server_secure_overlay.py), not via a
+  // public WiFiServerSecure API on this pinned core.
   server->getServer().setBufferSizes(HTTPS_FEASIBILITY_RX_BUF, HTTPS_FEASIBILITY_TX_BUF);
   server->getServer().setECCert(
       HttpsFeasibilityCert,
