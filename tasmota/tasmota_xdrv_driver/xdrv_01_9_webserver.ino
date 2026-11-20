@@ -681,10 +681,11 @@ static void WebServerRegisterDispatchRoutes(void) {
 // Bind routes onto the HTTPS listener only (do not duplicate onto HTTP).
 void WebServerRegisterRoutesForHttps(void) {
   if ((Webserver == nullptr) || (Webserver->httpsServer() == nullptr)) { return; }
-  TasmotaHttpsWebServer *https = Webserver->httpsServer();
+
+  Webserver->setRouteTarget(TASMOTA_WEB_ROUTE_HTTPS);
 
   const char* headerkeys[] = { "Referer", "Host" };
-  https->collectHeaders(headerkeys, 2);
+  Webserver->httpsServer()->collectHeaders(headerkeys, 2);
 
   for (uint32_t i = 0; i < nitems(WebServerDispatch); i++) {
     const WebServerDispatch_t & line = WebServerDispatch[i];
@@ -693,14 +694,16 @@ void WebServerRegisterRoutesForHttps(void) {
     uri[1] = pgm_read_byte(&line.uri[0]);
     uri[2] = pgm_read_byte(&line.uri[1]);
     uri[3] = '\0';
-    https->on(uri, (HTTPMethod)pgm_read_byte(&line.method), line.handler);
+    WebServer_on(uri, line.handler, pgm_read_byte(&line.method));
   }
-  https->onNotFound(HandleNotFound);
-  https->on("/u2", HTTP_POST, HandleUploadDone, HandleUploadLoop);
-  // Driver handlers: briefly expose HTTPS via facade dual-on by calling ADD_HANDLER
-  // while HTTP on() is skipped — drivers use Webserver->on (both). To avoid HTTP
-  // duplication, call ADD_HANDLER only at initial HTTP setup. HTTPS gets core
-  // dispatch table; driver-specific routes remain HTTP-only in this milestone.
+  Webserver->onNotFound(HandleNotFound);
+  Webserver->on("/u2", HTTP_POST, HandleUploadDone, HandleUploadLoop);
+#ifndef FIRMWARE_MINIMAL
+  // Drivers that call Webserver->on() are registered on HTTPS only here.
+  // addHandler()-based routes remain HTTP-only (RequestHandler types differ).
+  XdrvXsnsCall(FUNC_WEB_ADD_HANDLER);
+#endif
+  Webserver->setRouteTarget(TASMOTA_WEB_ROUTE_BOTH);
 }
 #endif  // USE_WEBSERVER_HTTPS
 
@@ -737,24 +740,28 @@ void StartWebserver(int type) {
     Web.reset_web_log_flag = false;
 
     Webserver->begin(); // HTTP web server start
-#ifdef USE_WEBSERVER_HTTPS
-    // Confirmed HTTPS only — never auto-start from an unconfirmed trial after reboot.
-    if (Settings->sbflag1.https_webserver &&
-        (HTTP_MANAGER != type) && (HTTP_MANAGER_RESET_ONLY != type)) {
-      if (HttpsFeasibilityStartListener(Webserver)) {
-        WebServerRegisterRoutesForHttps();
-        HttpsFeasibilityBeginListener(Webserver);
-      } else {
-        AddLog(LOG_LEVEL_ERROR, PSTR(D_LOG_HTTP "HTTPS persisted enable failed — HTTP continues"));
-      }
-    }
-#endif  // USE_WEBSERVER_HTTPS
   }
   if (Web.state != type) {
     AddLogServerActive(PSTR(D_LOG_HTTP "Web"));
     TasmotaGlobal.rules_flag.http_init = 1;
     Web.state = type;
   }
+#ifdef USE_WEBSERVER_HTTPS
+  // Manager/captive: HTTPS must not run. Confirmed bit is preserved for later restore.
+  if ((HTTP_MANAGER == type) || (HTTP_MANAGER_RESET_ONLY == type)) {
+    HttpsFeasibilitySuspendForManager(Webserver);
+  } else if (Settings->sbflag1.https_webserver && !HttpsFeasibilityIsListenerRunning()) {
+    // Confirmed-only restore (never restores a trial). Safe after manager exit too.
+    if (HttpsFeasibilityStartListener(Webserver)) {
+      WebServerRegisterRoutesForHttps();
+      if (!HttpsFeasibilityBeginListener(Webserver)) {
+        HttpsFeasibilityNoteBootFailure(Webserver);
+      }
+    } else {
+      HttpsFeasibilityNoteBootFailure(Webserver);
+    }
+  }
+#endif  // USE_WEBSERVER_HTTPS
 }
 
 /*-------------------------------------------------------------------------------------------*/
@@ -3113,7 +3120,8 @@ void HandleBackupConfiguration(void) {
   uint32_t config_len = SettingsConfigBackup();
   if (!config_len) { return; }    // Unable to allocate buffer
 
-  WiFiClient myClient = Webserver->client();
+  // Use live client reference — WiFiClient-by-value would slice BearSSL on HTTPS.
+  WiFiClient &myClient = Webserver->client();
   Webserver->setContentLength(config_len);
 
   char attachment[TOPSZ];
@@ -3121,7 +3129,7 @@ void HandleBackupConfiguration(void) {
   Webserver->sendHeader(F("Content-Disposition"), attachment);
 
   WSSend(200, CT_APP_STREAM, "");
-  myClient.write((const char*)settings_buffer, config_len);
+  myClient.write((const uint8_t*)settings_buffer, config_len);
 
   SettingsBufferFree();
 }

@@ -95,11 +95,17 @@ bool HttpsFeasibilityIsListenerRunning(void);
 uint8_t HttpsFeasibilityGetMode(void);  // HttpsFeasibilityMode as uint8_t (Arduino .ino prototypes)
 bool HttpsFeasibilityConfirmedPersisted(void);
 
+#ifndef HTTPS_FEASIBILITY_BOOT_FAIL_LIMIT
+#define HTTPS_FEASIBILITY_BOOT_FAIL_LIMIT  3
+#endif
+
 // Start TLS listener only (HTTP must already be running independently).
 // Call order: StartListener → WebServerRegisterRoutesForHttps → BeginListener.
 bool HttpsFeasibilityStartListener(void *facade_webserver);
 bool HttpsFeasibilityBeginListener(void *facade_webserver);
 void HttpsFeasibilityStopListener(void *facade_webserver);
+void HttpsFeasibilitySuspendForManager(void *facade_webserver);
+void HttpsFeasibilityNoteBootFailure(void *facade_webserver);
 
 // Trial / confirm / off. Returns true if command handled.
 bool HttpsFeasibilityCmnd(void);

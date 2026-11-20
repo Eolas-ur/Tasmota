@@ -44,8 +44,11 @@ class TestHttpsOptional(unittest.TestCase):
     def test_failed_https_leaves_http_note(self):
         ino = INO.read_text(encoding="utf-8")
         self.assertIn("HTTP unchanged", ino)
+        self.assertIn("HTTP continues", ino)
+        self.assertIn("HttpsFeasibilityNoteBootFailure", ino)
         xdrv = XDRV.read_text(encoding="utf-8")
-        self.assertIn("HTTP continues", xdrv)
+        self.assertIn("HttpsFeasibilityNoteBootFailure", xdrv)
+        self.assertIn("HttpsFeasibilitySuspendForManager", xdrv)
 
     def test_redirect_reserved_disabled(self):
         hdr = HDR.read_text(encoding="utf-8")

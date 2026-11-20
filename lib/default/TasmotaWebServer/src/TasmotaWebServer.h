@@ -31,6 +31,8 @@ class TasmotaHttpWebServer : public ESP8266WebServer
 public:
   TasmotaHttpWebServer(int port) : ESP8266WebServer(port) {}
   bool isChunked(void) const { return _chunked; }
+  // Reference to the live request client (no copy / no slicing).
+  WiFiClient &activeClient(void) { return _currentClient; }
 };
 
 class TasmotaHttpsWebServer : public HttpsFeasibilityWebServer
@@ -38,11 +40,25 @@ class TasmotaHttpsWebServer : public HttpsFeasibilityWebServer
 public:
   TasmotaHttpsWebServer(int port) : HttpsFeasibilityWebServer(port) {}
   bool isChunked(void) const { return _chunked; }
+  // WiFiClientSecure is-a WiFiClient; returning a base reference preserves vtable.
+  WiFiClient &activeClient(void) { return _currentClient; }
+  BearSSL::WiFiClientSecure activeClientSecureCopy(void) {
+    return _currentClient;  // WiFiClientSecure copy ctor keeps TLS shared state
+  }
+};
+
+enum TasmotaWebRouteTarget : uint8_t {
+  TASMOTA_WEB_ROUTE_HTTP = 0,   // register on HTTP only
+  TASMOTA_WEB_ROUTE_HTTPS = 1,  // register on HTTPS only
+  TASMOTA_WEB_ROUTE_BOTH = 2,   // register on whichever listeners exist
 };
 
 /*
-  M5-01A facade: HTTP + optional HTTPS. Constructing with a port creates the
-  cleartext listener (Wemo-compatible). HTTPS is attached later via attachHttps().
+  M5-01B facade: HTTP + optional HTTPS.
+  client() returns WiFiClient& to the live request client so virtual write/flush/stop
+  use BearSSL when serving HTTPS. Callers must not assign into a WiFiClient value
+  object while httpsServing() — that slices TLS state; use client() reference or
+  clientSecureCopy() instead.
 */
 class TasmotaWebServer
 {
@@ -70,6 +86,8 @@ public:
   TasmotaHttpsWebServer *httpsServer(void) const { return _https; }
   void setHttpsServing(bool on) { _https_serving = on && (_https != nullptr); }
   bool httpsServing(void) const { return _https_serving; }
+  void setRouteTarget(TasmotaWebRouteTarget target) { _route_target = target; }
+  TasmotaWebRouteTarget routeTarget(void) const { return _route_target; }
 
   void begin(void) { if (_http) { _http->begin(); } }
   void close(void) { if (_http) { _http->close(); } }
@@ -88,20 +106,20 @@ public:
   }
 
   void onNotFound(ESP8266WebServer::THandlerFunction fn) {
-    if (_http) { _http->onNotFound(fn); }
-    if (_https) { _https->onNotFound(fn); }
+    if (_route_http()) { _http->onNotFound(fn); }
+    if (_route_https()) { _https->onNotFound(fn); }
   }
 
   void on(const Uri &uri, ESP8266WebServer::THandlerFunction fn) {
     on(uri, HTTP_ANY, fn);
   }
   void on(const Uri &uri, HTTPMethod method, ESP8266WebServer::THandlerFunction fn) {
-    if (_http) { _http->on(uri, method, fn); }
-    if (_https) { _https->on(uri, method, fn); }
+    if (_route_http()) { _http->on(uri, method, fn); }
+    if (_route_https()) { _https->on(uri, method, fn); }
   }
   void on(const Uri &uri, HTTPMethod method, ESP8266WebServer::THandlerFunction fn, ESP8266WebServer::THandlerFunction ufn) {
-    if (_http) { _http->on(uri, method, fn, ufn); }
-    if (_https) { _https->on(uri, method, fn, ufn); }
+    if (_route_http()) { _http->on(uri, method, fn, ufn); }
+    if (_route_https()) { _https->on(uri, method, fn, ufn); }
   }
   void on(const char *uri, ESP8266WebServer::THandlerFunction fn) { on(Uri(uri), fn); }
   void on(const char *uri, HTTPMethod method, ESP8266WebServer::THandlerFunction fn) { on(Uri(uri), method, fn); }
@@ -118,8 +136,11 @@ public:
     on(String(uri), method, fn);
   }
 
-  // RequestHandler types differ per ServerType template — register on HTTP only.
+  // RequestHandler<ServerType> is not shareable across HTTP/HTTPS templates.
+  // Skip when targeting HTTPS-only so FUNC_WEB_ADD_HANDLER rebind does not
+  // duplicate HTTP addHandler registrations.
   void addHandler(RequestHandler *handler) {
+    if (_route_target == TASMOTA_WEB_ROUTE_HTTPS) { return; }
     if (_http) { _http->addHandler(handler); }
   }
   void enableCORS(bool enable) {
@@ -165,11 +186,23 @@ public:
     return _https_serving ? _https->method() : _http->method();
   }
 
-  // Core returns ClientType by value.
-  WiFiClient client(void) {
-    if (_https_serving) { return _https->client(); }
-    return _http->client();
+  // Live client reference — preserves WiFiClientSecure vtable when HTTPS.
+  WiFiClient &client(void) {
+    if (_https_serving) { return _https->activeClient(); }
+    return _http->activeClient();
   }
+
+  // Proper TLS-preserving copy for long-lived streaming (filesystem download, etc.).
+  BearSSL::WiFiClientSecure clientSecureCopy(void) {
+    return _https->activeClientSecureCopy();
+  }
+
+  size_t clientWrite(const uint8_t *buf, size_t size) {
+    return client().write(buf, size);
+  }
+  void clientFlush(void) { client().flush(); }
+  void clientStop(void) { client().stop(); }
+
   HTTPUpload &upload(void) {
     if (_https_serving) { return _https->upload(); }
     return _http->upload();
@@ -227,10 +260,18 @@ public:
   }
 
 private:
+  bool _route_http(void) const {
+    return _http && (_route_target == TASMOTA_WEB_ROUTE_HTTP || _route_target == TASMOTA_WEB_ROUTE_BOTH);
+  }
+  bool _route_https(void) const {
+    return _https && (_route_target == TASMOTA_WEB_ROUTE_HTTPS || _route_target == TASMOTA_WEB_ROUTE_BOTH);
+  }
+
   TasmotaHttpWebServer *_http = nullptr;
   TasmotaHttpsWebServer *_https = nullptr;
   bool _https_serving = false;
   bool _owns_http = false;
+  TasmotaWebRouteTarget _route_target = TASMOTA_WEB_ROUTE_BOTH;
 };
 
 #else  // !USE_WEBSERVER_HTTPS
@@ -240,6 +281,8 @@ class TasmotaWebServer : public ESP8266WebServer
 public:
   TasmotaWebServer(int port) : ESP8266WebServer(port) {}
   bool isChunked(void) const { return _chunked; }
+  // Match facade semantics: reference to live client (no temporary copy).
+  WiFiClient &client(void) { return _currentClient; }
 };
 
 #endif  // USE_WEBSERVER_HTTPS

@@ -19,13 +19,21 @@ HTTPS serves the same dispatch handlers as HTTP (core table). `WebPassword` / `W
 
 Driver-added routes (`FUNC_WEB_ADD_HANDLER`) are registered on HTTP at startup; HTTPS late-bind currently receives the core dispatch table only (documented limitation).
 
-## Failure cases not auto-recoverable
+## Failure cases and recovery
 
 | Failure | Effect |
 |---------|--------|
-| Crash / abort inside BearSSL / `stack_thunk` OOM before trial expiry | Device reboots; **trial is not persisted** → HTTPS stays off. Confirmed mode would retry HTTPS after reboot (may loop if HTTPS itself causes abort). |
-| Confirmed HTTPS causes boot-time abort | May require serial reflash or safe mode; Quick Power Cycle / button alone is not the designed recovery. Prefer trial validation before Confirm. |
+| Crash / abort inside BearSSL / `stack_thunk` OOM before trial expiry | Device reboots; **trial is not persisted** → HTTPS stays off. |
+| Confirmed HTTPS start fails (soft) | HTTP continues; after `HTTPS_FEASIBILITY_BOOT_FAIL_LIMIT` (3) start failures in one uptime, confirmed bit is cleared once via `SettingsSave`. |
+| Confirmed HTTPS causes hard abort before suppression runs | May still boot-loop; prefer Trial validation before Confirm. Serial recovery remains the hard fallback. |
 | Heap exhaustion starting listener | Start fails; HTTP remains up; error in `HttpsWeb` status. |
+| Wi-Fi manager / captive | HTTPS listener suspended; confirmed persistence kept; restored when STA web returns. |
+
+## Client transport note (M5-01B)
+
+`Webserver->client()` returns a **reference** to the live request client so BearSSL
+virtual `write`/`flush`/`stop` are preserved on HTTPS. Assigning into a `WiFiClient`
+value object while `httpsServing()` slices TLS state and is unsupported.
 
 ## Operator guidance
 

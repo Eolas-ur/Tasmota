@@ -22,6 +22,7 @@ extern "C" int8_t HttpsFeasibilityTlsHsOk = -1;
 static HttpsFeasibilityMode HttpsMode = HTTPS_MODE_OFF;
 static uint32_t HttpsTrialDeadlineMs = 0;
 static bool HttpsListenerRunning = false;
+static uint8_t HttpsBootFailCount = 0;
 static char HttpsLastError[40] = "";
 
 #if HTTPS_FEASIBILITY_INSTRUMENT
@@ -323,6 +324,7 @@ bool HttpsFeasibilityBeginListener(void *facade_webserver) {
   const uint32_t heap_before = ESP.getFreeHeap();
   facade->httpsServer()->begin();
   HttpsListenerRunning = true;
+  HttpsBootFailCount = 0;
 #if HTTPS_FEASIBILITY_INSTRUMENT
   HttpsFeasibilityNoteInitHeaps(heap_before, ESP.getFreeHeap());
 #endif
@@ -348,6 +350,47 @@ void HttpsFeasibilityStopListener(void *facade_webserver) {
   }
   HttpsTrialDeadlineMs = 0;
   AddLog(LOG_LEVEL_INFO, PSTR("HTTPS: listener stopped (HTTP unchanged)"));
+}
+
+void HttpsFeasibilitySuspendForManager(void *facade_webserver) {
+  auto *facade = static_cast<TasmotaWebServer *>(facade_webserver);
+  if (facade == nullptr) { return; }
+  // Drop the TLS listener during captive/manager; keep confirmed persistence.
+  if (!HttpsListenerRunning && (facade->httpsServer() == nullptr)) {
+    return;
+  }
+  HttpsFeasibilityStopListener(facade_webserver);
+  if (Settings->sbflag1.https_webserver) {
+    HttpsMode = HTTPS_MODE_CONFIRMED;  // listener restarted when STA web returns
+  } else {
+    HttpsMode = HTTPS_MODE_OFF;
+  }
+  AddLog(LOG_LEVEL_INFO, PSTR("HTTPS: suspended for Wi-Fi manager (HTTP captive active)"));
+}
+
+void HttpsFeasibilityNoteBootFailure(void *facade_webserver) {
+  (void)facade_webserver;
+  AddLog(LOG_LEVEL_ERROR, PSTR("HTTPS: persisted enable failed — HTTP continues"));
+  if (!Settings->sbflag1.https_webserver) {
+    return;
+  }
+  if (HttpsBootFailCount < 255) {
+    HttpsBootFailCount++;
+  }
+  // After repeated confirmed-start failures within this uptime, clear persistence once.
+  // Survives soft issues without wiping Wi-Fi; lost on power cycle (by design — avoids RTC redesign).
+  if (HttpsBootFailCount >= HTTPS_FEASIBILITY_BOOT_FAIL_LIMIT) {
+    Settings->sbflag1.https_webserver = 0;
+    HttpsMode = HTTPS_MODE_OFF;
+    HttpsBootFailCount = 0;
+    SettingsSave(0);
+    HttpsFeasibilitySetError("boot_fail_suppressed");
+    AddLog(LOG_LEVEL_ERROR,
+           PSTR("HTTPS: confirmed mode suppressed after %u start failures"),
+           (uint32_t)HTTPS_FEASIBILITY_BOOT_FAIL_LIMIT);
+  } else {
+    HttpsFeasibilitySetError("boot_fail");
+  }
 }
 
 void HttpsFeasibilityEverySecond(void *facade_webserver) {
@@ -440,7 +483,16 @@ bool HttpsFeasibilityCmnd(void) {
       strcasecmp_P(XdrvMailbox.data, PSTR("Trial")) == 0 ||
       strcasecmp_P(XdrvMailbox.data, PSTR("Start")) == 0) {
     // Trial: do NOT persist. Reboot must not re-enable.
+    // Confirmed → Trial demotes persistence first.
+    const bool was_persisted = Settings->sbflag1.https_webserver;
     Settings->sbflag1.https_webserver = 0;
+    if (was_persisted) { SettingsSave(0); }
+
+    if (HttpsListenerRunning) {
+      HttpsFeasibilityStopListener(Webserver);
+    }
+    HttpsMode = HTTPS_MODE_OFF;
+
     if (!HttpsFeasibilityStartListener(Webserver)) {
       HttpsMode = HTTPS_MODE_OFF;
       HttpsFeasibilityRespondStatus();
