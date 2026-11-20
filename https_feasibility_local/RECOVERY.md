@@ -1,25 +1,37 @@
-# Operational recovery notes (M5-00D)
+# Operational recovery notes (M5-01A)
 
-## Current feasibility behaviour
+## Current behaviour (`USE_WEBSERVER_HTTPS`)
 
-| Mode | Behaviour under `USE_WEBSERVER_HTTPS` |
-|------|--------------------------------------|
-| Normal admin UI | Single TLS listener (port 443). Same handlers/auth as HTTP build (`WebPassword`). Not a second open admin surface. |
-| Wi-Fi manager / captive | Still constructs TLS on port 80. Captive portals expect cleartext HTTP — **broken UX** until a dual-stack or staged design exists. |
-| Firmware upgrade | `/u2` upload path remains registered over TLS. Large bodies + small RX buffers are a runtime risk (test on lab board). |
-| TLS configure failure | Fail-closed: delete server object, leave `Web.state` off, no keyless listener. |
-| `stack_thunk` OOM | Core `StackThunk.cpp` calls `abort()` — hard restart. Not soft-recoverable in stock core. |
+| Mode | Behaviour |
+|------|-----------|
+| Default boot | **HTTP :80 only.** HTTPS is compiled in but disabled (no TLS listener, no handshake buffers). |
+| `HttpsWeb Trial` / `1` | Starts HTTPS :443 in RAM trial mode. **Not persisted.** Auto-reverts after `HTTPS_FEASIBILITY_TRIAL_SEC` (default 300). Reboot cancels trial. |
+| `HttpsWeb Confirm` / `2` | Persists `Settings->sbflag1.https_webserver` and keeps listener. Survives reboot. |
+| `HttpsWeb Off` / `0` | Stops listener; clears persisted bit. HTTP unaffected. |
+| Wi-Fi manager / captive | Cleartext HTTP :80 (facade + `TasmotaHttpWebServer`). HTTPS is not started in manager modes. |
+| HTTPS configure/start failure | Logged; **HTTP continues**. |
+| Factory reset | Settings memset clears `https_webserver` → HTTPS stays off. |
+| `HttpRedirectToHttps` | **Reserved / not implemented** (reports 0). |
 
-## Production recovery pathway (proposal only — not implemented)
+## Authentication
 
-Goal: retain recovery without an unrestricted second admin interface.
+HTTPS serves the same dispatch handlers as HTTP (core table). `WebPassword` / `WebAuthenticate` apply. This is not an open second admin surface.
 
-1. **Primary:** HTTPS admin with authentication (existing WebPassword / future mandatory auth).
-2. **Local-only recovery:** serial console / USB flash remains the guaranteed brick-recovery path.
-3. **Optional staged cleartext:** time-limited or button-held HTTP **only** on AP/manager mode for captive provisioning, disabled once STA is configured — never a permanent parallel open admin port on LAN.
-4. **TLS init failure:** keep fail-closed; surface a safe LED/serial fault; do not auto-open unauthenticated HTTP on LAN.
-5. **Do not** add network-reset or credential-wiping recovery hooks in this feasibility branch.
+Driver-added routes (`FUNC_WEB_ADD_HANDLER`) are registered on HTTP at startup; HTTPS late-bind currently receives the core dispatch table only (documented limitation).
 
-## Secondary-stack failure
+## Failure cases not auto-recoverable
 
-Document for operators: first `WiFiServerSecure` construction allocates 6200 bytes. If heap cannot satisfy it, device aborts. Lab tests must watch free heap before `StartWebserver`.
+| Failure | Effect |
+|---------|--------|
+| Crash / abort inside BearSSL / `stack_thunk` OOM before trial expiry | Device reboots; **trial is not persisted** → HTTPS stays off. Confirmed mode would retry HTTPS after reboot (may loop if HTTPS itself causes abort). |
+| Confirmed HTTPS causes boot-time abort | May require serial reflash or safe mode; Quick Power Cycle / button alone is not the designed recovery. Prefer trial validation before Confirm. |
+| Heap exhaustion starting listener | Start fails; HTTP remains up; error in `HttpsWeb` status. |
+
+## Operator guidance
+
+1. Keep HTTP reachable on :80.
+2. Run `HttpsWeb Trial`, test TLS from a lab client, watch heap/`HttpsMetrics`.
+3. Only then `HttpsWeb Confirm`.
+4. On problems: `HttpsWeb Off` over HTTP/MQTT/serial.
+
+Do not flash the managed Athom plug at 172.18.10.69 with experimental images without a serial recovery plan.

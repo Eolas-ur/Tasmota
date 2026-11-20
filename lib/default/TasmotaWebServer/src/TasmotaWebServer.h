@@ -21,34 +21,229 @@
 #define __TASMOTA_WEBSERVER__
 
 #ifdef ESP8266
+#include <ESP8266WebServer.h>
+
 #ifdef USE_WEBSERVER_HTTPS
 #include "tasmota_support/https_feasibility.h"
 
-// Feasibility-only: HTTPS webserver template over instrumented WiFiServerSecure.
-// Not enabled in production envs. Manager/captive HTTP is not preserved under this gate.
-class TasmotaWebServer : public HttpsFeasibilityWebServer
+class TasmotaHttpWebServer : public ESP8266WebServer
 {
 public:
-	TasmotaWebServer(int port) : HttpsFeasibilityWebServer(port)
-	{
-	}
-
+  TasmotaHttpWebServer(int port) : ESP8266WebServer(port) {}
   bool isChunked(void) const { return _chunked; }
 };
-#else
-#include <ESP8266WebServer.h>
+
+class TasmotaHttpsWebServer : public HttpsFeasibilityWebServer
+{
+public:
+  TasmotaHttpsWebServer(int port) : HttpsFeasibilityWebServer(port) {}
+  bool isChunked(void) const { return _chunked; }
+};
+
+/*
+  M5-01A facade: HTTP + optional HTTPS. Constructing with a port creates the
+  cleartext listener (Wemo-compatible). HTTPS is attached later via attachHttps().
+*/
+class TasmotaWebServer
+{
+public:
+  explicit TasmotaWebServer(int port = 80) {
+    _http = new TasmotaHttpWebServer(port);
+    _owns_http = true;
+  }
+  ~TasmotaWebServer(void) {
+    if (_owns_http) {
+      delete _http;
+      _http = nullptr;
+    }
+  }
+
+  void attachHttp(TasmotaHttpWebServer *server) {
+    if (_owns_http) {
+      delete _http;
+      _owns_http = false;
+    }
+    _http = server;
+  }
+  void attachHttps(TasmotaHttpsWebServer *server) { _https = server; }
+  TasmotaHttpWebServer *httpServer(void) const { return _http; }
+  TasmotaHttpsWebServer *httpsServer(void) const { return _https; }
+  void setHttpsServing(bool on) { _https_serving = on && (_https != nullptr); }
+  bool httpsServing(void) const { return _https_serving; }
+
+  void begin(void) { if (_http) { _http->begin(); } }
+  void close(void) { if (_http) { _http->close(); } }
+
+  void handleClient(void) {
+    if (_https_serving) {
+      if (_https) { _https->handleClient(); }
+    } else if (_http) {
+      _http->handleClient();
+    }
+  }
+
+  void collectHeaders(const char *headerKeys[], const size_t headerKeysCount) {
+    if (_http) { _http->collectHeaders(headerKeys, headerKeysCount); }
+    if (_https) { _https->collectHeaders(headerKeys, headerKeysCount); }
+  }
+
+  void onNotFound(ESP8266WebServer::THandlerFunction fn) {
+    if (_http) { _http->onNotFound(fn); }
+    if (_https) { _https->onNotFound(fn); }
+  }
+
+  void on(const Uri &uri, ESP8266WebServer::THandlerFunction fn) {
+    on(uri, HTTP_ANY, fn);
+  }
+  void on(const Uri &uri, HTTPMethod method, ESP8266WebServer::THandlerFunction fn) {
+    if (_http) { _http->on(uri, method, fn); }
+    if (_https) { _https->on(uri, method, fn); }
+  }
+  void on(const Uri &uri, HTTPMethod method, ESP8266WebServer::THandlerFunction fn, ESP8266WebServer::THandlerFunction ufn) {
+    if (_http) { _http->on(uri, method, fn, ufn); }
+    if (_https) { _https->on(uri, method, fn, ufn); }
+  }
+  void on(const char *uri, ESP8266WebServer::THandlerFunction fn) { on(Uri(uri), fn); }
+  void on(const char *uri, HTTPMethod method, ESP8266WebServer::THandlerFunction fn) { on(Uri(uri), method, fn); }
+  void on(const char *uri, HTTPMethod method, ESP8266WebServer::THandlerFunction fn, ESP8266WebServer::THandlerFunction ufn) {
+    on(Uri(uri), method, fn, ufn);
+  }
+  void on(const String &uri, ESP8266WebServer::THandlerFunction fn) { on(Uri(uri), fn); }
+  void on(const String &uri, HTTPMethod method, ESP8266WebServer::THandlerFunction fn) { on(Uri(uri), method, fn); }
+  void on(const String &uri, HTTPMethod method, ESP8266WebServer::THandlerFunction fn, ESP8266WebServer::THandlerFunction ufn) {
+    on(Uri(uri), method, fn, ufn);
+  }
+  void on(const __FlashStringHelper *uri, ESP8266WebServer::THandlerFunction fn) { on(String(uri), fn); }
+  void on(const __FlashStringHelper *uri, HTTPMethod method, ESP8266WebServer::THandlerFunction fn) {
+    on(String(uri), method, fn);
+  }
+
+  // RequestHandler types differ per ServerType template — register on HTTP only.
+  void addHandler(RequestHandler *handler) {
+    if (_http) { _http->addHandler(handler); }
+  }
+  void enableCORS(bool enable) {
+    if (_http) { _http->enableCORS(enable); }
+    if (_https) { _https->enableCORS(enable); }
+  }
+  void serveStatic(const char *uri, fs::FS &fs, const char *path) {
+    if (_http) { _http->serveStatic(uri, fs, path); }
+    if (_https) { _https->serveStatic(uri, fs, path); }
+  }
+
+  bool hasArg(const String &name) const {
+    return _https_serving ? _https->hasArg(name) : _http->hasArg(name);
+  }
+  bool hasArg(const __FlashStringHelper *name) const {
+    return _https_serving ? _https->hasArg(name) : _http->hasArg(name);
+  }
+  String arg(const String &name) const {
+    return _https_serving ? _https->arg(name) : _http->arg(name);
+  }
+  String arg(int i) const {
+    return _https_serving ? _https->arg(i) : _http->arg(i);
+  }
+  String arg(const __FlashStringHelper *name) const {
+    return _https_serving ? _https->arg(name) : _http->arg(name);
+  }
+  String argName(int i) const {
+    return _https_serving ? _https->argName(i) : _http->argName(i);
+  }
+  int args(void) const {
+    return _https_serving ? _https->args() : _http->args();
+  }
+  String header(const String &name) const {
+    return _https_serving ? _https->header(name) : _http->header(name);
+  }
+  String hostHeader(void) const {
+    return _https_serving ? _https->hostHeader() : _http->hostHeader();
+  }
+  String uri(void) const {
+    return _https_serving ? _https->uri() : _http->uri();
+  }
+  HTTPMethod method(void) const {
+    return _https_serving ? _https->method() : _http->method();
+  }
+
+  // Core returns ClientType by value.
+  WiFiClient client(void) {
+    if (_https_serving) { return _https->client(); }
+    return _http->client();
+  }
+  HTTPUpload &upload(void) {
+    if (_https_serving) { return _https->upload(); }
+    return _http->upload();
+  }
+
+  bool authenticate(const char *username, const char *password) {
+    if (_https_serving) { return _https->authenticate(username, password); }
+    return _http->authenticate(username, password);
+  }
+  void requestAuthentication(void) {
+    if (_https_serving) { _https->requestAuthentication(); }
+    else { _http->requestAuthentication(); }
+  }
+
+  void send(int code, const char *content_type = nullptr, const String &content = String("")) {
+    if (_https_serving) { _https->send(code, content_type, content); }
+    else { _http->send(code, content_type, content); }
+  }
+  void send(int code, char *content_type, const String &content) {
+    if (_https_serving) { _https->send(code, content_type, content); }
+    else { _http->send(code, content_type, content); }
+  }
+  void send(int code, const String &content_type, const String &content) {
+    if (_https_serving) { _https->send(code, content_type, content); }
+    else { _http->send(code, content_type, content); }
+  }
+  void send_P(int code, PGM_P content_type, PGM_P content) {
+    if (_https_serving) { _https->send_P(code, content_type, content); }
+    else { _http->send_P(code, content_type, content); }
+  }
+  void sendContent(const String &content) {
+    if (_https_serving) { _https->sendContent(content); }
+    else { _http->sendContent(content); }
+  }
+  void sendContent(const char *content, size_t size) {
+    if (_https_serving) { _https->sendContent(content, size); }
+    else { _http->sendContent(content, size); }
+  }
+  void sendContent_P(PGM_P content) {
+    if (_https_serving) { _https->sendContent_P(content); }
+    else { _http->sendContent_P(content); }
+  }
+  void sendHeader(const String &name, const String &value, bool first = false) {
+    if (_https_serving) { _https->sendHeader(name, value, first); }
+    else { _http->sendHeader(name, value, first); }
+  }
+  void setContentLength(const size_t contentLength) {
+    if (_https_serving) { _https->setContentLength(contentLength); }
+    else { _http->setContentLength(contentLength); }
+  }
+
+  bool isChunked(void) const {
+    if (_https_serving) { return _https->isChunked(); }
+    return _http ? _http->isChunked() : false;
+  }
+
+private:
+  TasmotaHttpWebServer *_http = nullptr;
+  TasmotaHttpsWebServer *_https = nullptr;
+  bool _https_serving = false;
+  bool _owns_http = false;
+};
+
+#else  // !USE_WEBSERVER_HTTPS
 
 class TasmotaWebServer : public ESP8266WebServer
 {
 public:
-	TasmotaWebServer(int port) : ESP8266WebServer(port)
-	{
-	}
-
+  TasmotaWebServer(int port) : ESP8266WebServer(port) {}
   bool isChunked(void) const { return _chunked; }
 };
-#endif // USE_WEBSERVER_HTTPS
-#endif // ESP8266
+
+#endif  // USE_WEBSERVER_HTTPS
+#endif  // ESP8266
 
 #ifdef ESP32
 #include <WebServer.h>
@@ -57,16 +252,12 @@ public:
 class TasmotaWebServer : public WebServer
 {
 public:
-	TasmotaWebServer(int port) :WebServer(port)
-	{
-	}
+  TasmotaWebServer(int port) :WebServer(port)
+  {
+  }
 
   bool isChunked(void) const { return _chunked; }
 
-  // Basic authentication only. These hide WebServer::authenticate() and
-  // WebServer::requestAuthentication(), which also implement Digest auth.
-  // Since Arduino 3.3.12-1 Digest auth links HMAC-SHA256 and SHA-512 code (~7 KB flash)
-  // even when only Basic auth is used.
   bool authenticate(const char *username, const char *password) {
     String auth = header(F("Authorization"));
     if (!auth.startsWith(F("Basic "))) { return false; }

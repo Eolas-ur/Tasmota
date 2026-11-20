@@ -282,7 +282,7 @@ typedef union {
     uint32_t dali_light : 1;               // bit 13 (v14.2.0.6) - CMND_DALILIGHT - Enable Tasmota light controls for DALI
     uint32_t dali_no_broadcast_slider : 1; // bit 14 (v15.1.0.3) - CMND_DALIBROADCASTSLIDER - Disable display of broadcast slider
     uint32_t miel_hvac_mb_enable : 1;      // bit 15 (v15.6.0.1) - CMND_HVACMODBUS - Enable MiEL HVAC Modbus RTU slave
-    uint32_t spare16 : 1;                  // bit 16
+    uint32_t https_webserver : 1;          // bit 16 (experimental) - CMND_HTTPSWEB confirm — HTTPS :443 enabled (USE_WEBSERVER_HTTPS)
     uint32_t spare17 : 1;                  // bit 17
     uint32_t spare18 : 1;                  // bit 18
     uint32_t spare19 : 1;                  // bit 19

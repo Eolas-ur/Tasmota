@@ -1,15 +1,16 @@
 /*
-  https_feasibility.ino - BearSSL HTTPS feasibility configuration + instrumentation.
+  https_feasibility.ino - Optional BearSSL HTTPS listener + experimental safeguards.
 
-  M5-00H: HsOk/HsFail come from overlay HttpsFeasibilityTlsHsOk (set from
-  _wait_for_handshake()), not from client.connected(). Transport connection
-  state is recorded separately. Heap mins remain sampled checkpoints.
+  M5-01A: HTTPS is disabled by default. HTTP remains independent on :80.
+  Activation uses RAM trial mode, explicit confirm into Settings->sbflag1.https_webserver,
+  automatic trial expiry, and factory-reset clear (memset of Settings).
 */
 
 #ifdef USE_WEBSERVER_HTTPS
 #ifdef ESP8266
 
 #include "tasmota_support/https_feasibility.h"
+#include <TasmotaWebServer.h>
 
 static BearSSL::X509List *HttpsFeasibilityCert = nullptr;
 static BearSSL::PrivateKey *HttpsFeasibilityKey = nullptr;
@@ -18,10 +19,13 @@ static bool HttpsFeasibilityReady = false;
 extern "C" int HttpsFeasibilityTlsAcceptErr = 0;
 extern "C" int8_t HttpsFeasibilityTlsHsOk = -1;
 
+static HttpsFeasibilityMode HttpsMode = HTTPS_MODE_OFF;
+static uint32_t HttpsTrialDeadlineMs = 0;
+static bool HttpsListenerRunning = false;
+static char HttpsLastError[40] = "";
+
 #if HTTPS_FEASIBILITY_INSTRUMENT
 
-// Checkpoint stages from overlay _connectSSLServerEC:
-// 0 before alloc, 1 after iobuf, 2 after engine reset, 3 after handshake attempt.
 enum : uint8_t {
   HTTPS_CKPT_BEFORE_ALLOC = 0,
   HTTPS_CKPT_AFTER_IOBUF = 1,
@@ -32,28 +36,28 @@ enum : uint8_t {
 struct HttpsFeasibilityMetrics {
   uint32_t heap_before_init;
   uint32_t heap_after_init;
-  uint32_t heap_before_accept;       // sampled
-  uint32_t heap_ckpt_after_iobuf;    // sampled
-  uint32_t heap_ckpt_after_engine;   // sampled
-  uint32_t heap_after_hs;            // sampled
-  uint32_t heap_min_sampled;         // min of sampled free-heap checkpoints
-  uint32_t heap_after_disconnect;    // sampled
-  uint32_t max_free_block_min;       // min sampled max-block
+  uint32_t heap_before_accept;
+  uint32_t heap_ckpt_after_iobuf;
+  uint32_t heap_ckpt_after_engine;
+  uint32_t heap_after_hs;
+  uint32_t heap_min_sampled;
+  uint32_t heap_after_disconnect;
+  uint32_t max_free_block_min;
   uint8_t  frag_max;
   uint32_t hs_duration_ms;
   uint32_t hs_duration_max_ms;
   uint32_t hs_ok;
   uint32_t hs_fail;
   uint32_t hs_unknown;
-  uint32_t http_client_polls;        // handleClient polls while client.connected()
+  uint32_t http_client_polls;
   int32_t  last_ssl_error;
   uint32_t disconnects;
-  bool     last_transport_connected; // transport state at accept-end (not HS proof)
+  bool     last_transport_connected;
   bool     client_was_connected;
   bool     boot_logged;
   bool     accept_in_progress;
   uint32_t accept_start_ms;
-  bool     peak_is_sampled;          // always true: documents measurement method
+  bool     peak_is_sampled;
 };
 static HttpsFeasibilityMetrics HttpsMetrics = {};
 
@@ -80,7 +84,7 @@ void HttpsFeasibilityLogBootOnce(void) {
   HttpsMetrics.boot_logged = true;
   HttpsMetrics.peak_is_sampled = true;
   AddLog(LOG_LEVEL_INFO,
-         PSTR("HTTPS: boot reset='%s' free_heap=%u max_block=%u frag=%u (heap mins are sampled)"),
+         PSTR("HTTPS: boot reset='%s' free_heap=%u max_block=%u frag=%u (HTTPS default OFF)"),
          ESP.getResetReason().c_str(),
          ESP.getFreeHeap(),
          ESP.getMaxFreeBlockSize(),
@@ -95,7 +99,7 @@ void HttpsFeasibilityNoteInitHeaps(uint32_t heap_before, uint32_t heap_after) {
   HttpsMetrics.frag_max = ESP.getHeapFragmentation();
   HttpsMetrics.peak_is_sampled = true;
   AddLog(LOG_LEVEL_INFO,
-         PSTR("HTTPS: init heap before=%u after=%u delta=%d max_block=%u frag=%u"),
+         PSTR("HTTPS: listener heap before=%u after=%u delta=%d max_block=%u frag=%u"),
          heap_before,
          heap_after,
          (int32_t)heap_after - (int32_t)heap_before,
@@ -105,7 +109,6 @@ void HttpsFeasibilityNoteInitHeaps(uint32_t heap_before, uint32_t heap_after) {
 
 extern "C" void HttpsFeasibilityTlsCkpt(uint8_t stage, int32_t detail) {
   (void)detail;
-  // No AddLog here — keep BearSSL path allocation-light.
   switch (stage) {
     case HTTPS_CKPT_BEFORE_ALLOC:
       HttpsFeasibilitySampleFloor(&HttpsMetrics.heap_before_accept);
@@ -144,7 +147,6 @@ void HttpsFeasibilityOnAcceptEnd(BearSSL::WiFiClientSecure &client) {
     HttpsMetrics.hs_duration_max_ms = dur;
   }
 
-  // Transport state is informational only — not proof of handshake success.
   HttpsMetrics.last_transport_connected = client.connected();
 
   int err = HttpsFeasibilityTlsAcceptErr;
@@ -153,51 +155,33 @@ void HttpsFeasibilityOnAcceptEnd(BearSSL::WiFiClientSecure &client) {
   }
   HttpsMetrics.last_ssl_error = err;
 
-  // Authoritative outcome: overlay result of _wait_for_handshake() / early TLS fail.
   const int8_t hs = HttpsFeasibilityTlsHsOk;
   if (hs == 1) {
     HttpsMetrics.hs_ok++;
     AddLog(LOG_LEVEL_INFO,
-           PSTR("HTTPS: hs ok ms=%u transport=%u heap_samp before=%u iobuf=%u eng=%u after=%u min_samp=%u max_block_min=%u ok=%u"),
+           PSTR("HTTPS: hs ok ms=%u transport=%u min_samp=%u ok=%u"),
            dur,
            HttpsMetrics.last_transport_connected ? 1 : 0,
-           HttpsMetrics.heap_before_accept,
-           HttpsMetrics.heap_ckpt_after_iobuf,
-           HttpsMetrics.heap_ckpt_after_engine,
-           HttpsMetrics.heap_after_hs,
            HttpsMetrics.heap_min_sampled,
-           HttpsMetrics.max_free_block_min,
            HttpsMetrics.hs_ok);
   } else if (hs == 0) {
     HttpsMetrics.hs_fail++;
     AddLog(LOG_LEVEL_INFO,
-           PSTR("HTTPS: hs fail err=%d ms=%u transport=%u heap_samp before=%u after=%u min_samp=%u fail=%u"),
-           err,
-           dur,
-           HttpsMetrics.last_transport_connected ? 1 : 0,
-           HttpsMetrics.heap_before_accept,
-           HttpsMetrics.heap_after_hs,
-           HttpsMetrics.heap_min_sampled,
-           HttpsMetrics.hs_fail);
+           PSTR("HTTPS: hs fail err=%d ms=%u fail=%u"),
+           err, dur, HttpsMetrics.hs_fail);
   } else {
-    // No TLS attempt observed (hasClient race / path without _connectSSLServerEC).
     HttpsMetrics.hs_unknown++;
-    AddLog(LOG_LEVEL_DEBUG,
-           PSTR("HTTPS: hs unknown (no attempt) ms=%u transport=%u unknown=%u"),
-           dur,
-           HttpsMetrics.last_transport_connected ? 1 : 0,
-           HttpsMetrics.hs_unknown);
   }
 }
 
-void HttpsFeasibilityBeforeHandleClient(void *webserver) {
-  auto *server = static_cast<HttpsFeasibilityWebServer *>(webserver);
+void HttpsFeasibilityBeforeHandleClient(void *https_webserver) {
+  auto *server = static_cast<HttpsFeasibilityWebServer *>(https_webserver);
   if (server == nullptr) { return; }
   HttpsMetrics.client_was_connected = server->client().connected();
 }
 
-void HttpsFeasibilityAfterHandleClient(void *webserver) {
-  auto *server = static_cast<HttpsFeasibilityWebServer *>(webserver);
+void HttpsFeasibilityAfterHandleClient(void *https_webserver) {
+  auto *server = static_cast<HttpsFeasibilityWebServer *>(https_webserver);
   if (server == nullptr) { return; }
 
   const bool connected = server->client().connected();
@@ -208,51 +192,7 @@ void HttpsFeasibilityAfterHandleClient(void *webserver) {
   if (HttpsMetrics.client_was_connected && !connected) {
     HttpsMetrics.disconnects++;
     HttpsFeasibilitySampleFloor(&HttpsMetrics.heap_after_disconnect);
-    AddLog(LOG_LEVEL_DEBUG,
-           PSTR("HTTPS: disconnect heap_samp=%u max_block=%u frag=%u disc=%u"),
-           HttpsMetrics.heap_after_disconnect,
-           ESP.getMaxFreeBlockSize(),
-           ESP.getHeapFragmentation(),
-           HttpsMetrics.disconnects);
   }
-}
-
-bool HttpsFeasibilityCmnd(void) {
-  if (strcasecmp_P(XdrvMailbox.topic, PSTR("HttpsMetrics")) != 0) {
-    return false;
-  }
-  Response_P(
-    PSTR("{\"HttpsMetrics\":{"
-         "\"HeapBeforeInit\":%u,\"HeapAfterInit\":%u,"
-         "\"HeapBeforeAccept\":%u,\"HeapAfterIobuf\":%u,\"HeapAfterEngine\":%u,\"HeapAfterHs\":%u,"
-         "\"HeapMinSampled\":%u,\"HeapAfterDisc\":%u,\"MaxBlockMin\":%u,\"FragMax\":%u,"
-         "\"PeakIsSampled\":%u,"
-         "\"HsMs\":%u,\"HsMaxMs\":%u,\"HsOk\":%u,\"HsFail\":%u,\"HsUnknown\":%u,"
-         "\"HttpClientPolls\":%u,\"LastSslErr\":%d,\"TransportConnected\":%u,\"Disconnects\":%u,"
-         "\"RxBuf\":%u,\"TxBuf\":%u}}"),
-    HttpsMetrics.heap_before_init,
-    HttpsMetrics.heap_after_init,
-    HttpsMetrics.heap_before_accept,
-    HttpsMetrics.heap_ckpt_after_iobuf,
-    HttpsMetrics.heap_ckpt_after_engine,
-    HttpsMetrics.heap_after_hs,
-    HttpsMetrics.heap_min_sampled,
-    HttpsMetrics.heap_after_disconnect,
-    HttpsMetrics.max_free_block_min,
-    HttpsMetrics.frag_max,
-    HttpsMetrics.peak_is_sampled ? 1 : 0,
-    HttpsMetrics.hs_duration_ms,
-    HttpsMetrics.hs_duration_max_ms,
-    HttpsMetrics.hs_ok,
-    HttpsMetrics.hs_fail,
-    HttpsMetrics.hs_unknown,
-    HttpsMetrics.http_client_polls,
-    HttpsMetrics.last_ssl_error,
-    HttpsMetrics.last_transport_connected ? 1 : 0,
-    HttpsMetrics.disconnects,
-    (uint32_t)HTTPS_FEASIBILITY_RX_BUF,
-    (uint32_t)HTTPS_FEASIBILITY_TX_BUF);
-  return true;
 }
 
 #else  // !HTTPS_FEASIBILITY_INSTRUMENT
@@ -264,9 +204,38 @@ extern "C" void HttpsFeasibilityTlsCkpt(uint8_t stage, int32_t detail) {
 
 #endif  // HTTPS_FEASIBILITY_INSTRUMENT
 
-bool HttpsFeasibilityConfigureServer(void *webserver) {
-  auto *server = static_cast<HttpsFeasibilityWebServer *>(webserver);
+bool HttpsFeasibilityIsCompiled(void) {
+  return true;
+}
+
+bool HttpsFeasibilityIsListenerRunning(void) {
+  return HttpsListenerRunning;
+}
+
+uint8_t HttpsFeasibilityGetMode(void) {
+  return (uint8_t)HttpsMode;
+}
+
+bool HttpsFeasibilityConfirmedPersisted(void) {
+  return Settings->sbflag1.https_webserver;
+}
+
+void HttpsFeasibilityOnSettingsDefault(void) {
+  // Settings memset already clears https_webserver; ensure runtime matches.
+  HttpsMode = HTTPS_MODE_OFF;
+  HttpsTrialDeadlineMs = 0;
+  HttpsListenerRunning = false;
+  HttpsLastError[0] = '\0';
+}
+
+static void HttpsFeasibilitySetError(const char *msg) {
+  strlcpy(HttpsLastError, msg ? msg : "", sizeof(HttpsLastError));
+}
+
+bool HttpsFeasibilityConfigureServer(void *https_webserver) {
+  auto *server = static_cast<HttpsFeasibilityWebServer *>(https_webserver);
   if (server == nullptr) {
+    HttpsFeasibilitySetError("null_server");
     return false;
   }
 
@@ -284,6 +253,7 @@ bool HttpsFeasibilityConfigureServer(void *webserver) {
       delete HttpsFeasibilityKey;
       HttpsFeasibilityCert = nullptr;
       HttpsFeasibilityKey = nullptr;
+      HttpsFeasibilitySetError("cert_key");
       return false;
     }
     HttpsFeasibilityReady = true;
@@ -298,6 +268,220 @@ bool HttpsFeasibilityConfigureServer(void *webserver) {
       HttpsFeasibilityCert,
       BR_KEYTYPE_KEYX | BR_KEYTYPE_SIGN,
       HttpsFeasibilityKey);
+  HttpsFeasibilitySetError("");
+  return true;
+}
+
+bool HttpsFeasibilityStartListener(void *facade_webserver) {
+  auto *facade = static_cast<TasmotaWebServer *>(facade_webserver);
+  if (facade == nullptr) {
+    HttpsFeasibilitySetError("no_facade");
+    return false;
+  }
+  if (HttpsListenerRunning && facade->httpsServer() != nullptr) {
+    return true;
+  }
+
+  const uint32_t heap_before = ESP.getFreeHeap();
+  auto *https = new TasmotaHttpsWebServer(HTTPS_FEASIBILITY_PORT);
+  if (https == nullptr) {
+    HttpsFeasibilitySetError("oom_server");
+    AddLog(LOG_LEVEL_ERROR, PSTR("HTTPS: listener allocation failed — HTTP unchanged"));
+    return false;
+  }
+
+  if (!HttpsFeasibilityConfigureServer(https)) {
+    delete https;
+    AddLog(LOG_LEVEL_ERROR, PSTR("HTTPS: configure failed — HTTP unchanged"));
+    return false;
+  }
+
+  facade->attachHttps(https);
+
+  const char* headerkeys[] = { "Referer", "Host" };
+  https->collectHeaders(headerkeys, 2);
+
+  // Caller must invoke WebServerRegisterRoutesForHttps() then we begin().
+  // For boot-restore path the caller registers then we need begin — done below
+  // after optional mode mark. Routes may be empty until caller registers; begin
+  // is deferred to HttpsFeasibilityBeginListener().
+  HttpsListenerRunning = false;  // not accepting until BeginListener
+  (void)heap_before;
+  if (Settings->sbflag1.https_webserver) {
+    HttpsMode = HTTPS_MODE_CONFIRMED;
+  }
+  AddLog(LOG_LEVEL_INFO, PSTR("HTTPS: listener configured on port %u (await route bind)"),
+         (uint32_t)HTTPS_FEASIBILITY_PORT);
+  return true;
+}
+
+bool HttpsFeasibilityBeginListener(void *facade_webserver) {
+  auto *facade = static_cast<TasmotaWebServer *>(facade_webserver);
+  if ((facade == nullptr) || (facade->httpsServer() == nullptr)) {
+    return false;
+  }
+  const uint32_t heap_before = ESP.getFreeHeap();
+  facade->httpsServer()->begin();
+  HttpsListenerRunning = true;
+#if HTTPS_FEASIBILITY_INSTRUMENT
+  HttpsFeasibilityNoteInitHeaps(heap_before, ESP.getFreeHeap());
+#endif
+  AddLog(LOG_LEVEL_INFO, PSTR("HTTPS: listener accepting on port %u (HTTP :80 independent)"),
+         (uint32_t)HTTPS_FEASIBILITY_PORT);
+  return true;
+}
+
+void HttpsFeasibilityStopListener(void *facade_webserver) {
+  auto *facade = static_cast<TasmotaWebServer *>(facade_webserver);
+  if (facade == nullptr) {
+    return;
+  }
+  TasmotaHttpsWebServer *https = facade->httpsServer();
+  if (https != nullptr) {
+    https->close();
+    delete https;
+    facade->attachHttps(nullptr);
+  }
+  HttpsListenerRunning = false;
+  if (HttpsMode != HTTPS_MODE_CONFIRMED) {
+    HttpsMode = HTTPS_MODE_OFF;
+  }
+  HttpsTrialDeadlineMs = 0;
+  AddLog(LOG_LEVEL_INFO, PSTR("HTTPS: listener stopped (HTTP unchanged)"));
+}
+
+void HttpsFeasibilityEverySecond(void *facade_webserver) {
+  if (HttpsMode != HTTPS_MODE_TRIAL) {
+    return;
+  }
+  if (HttpsTrialDeadlineMs == 0) {
+    return;
+  }
+  if ((int32_t)(millis() - HttpsTrialDeadlineMs) < 0) {
+    return;
+  }
+  AddLog(LOG_LEVEL_INFO, PSTR("HTTPS: trial expired — reverting (not persisted)"));
+  HttpsFeasibilityStopListener(facade_webserver);
+  HttpsMode = HTTPS_MODE_OFF;
+  // Ensure confirmed bit stays clear for unconfirmed trials.
+  Settings->sbflag1.https_webserver = 0;
+}
+
+static void HttpsFeasibilityRespondStatus(void) {
+  Response_P(
+    PSTR("{\"HttpsWeb\":{"
+         "\"Compiled\":1,"
+         "\"Mode\":\"%s\","
+         "\"Listener\":%u,"
+         "\"Persisted\":%u,"
+         "\"Port\":%u,"
+         "\"TrialRemainSec\":%u,"
+         "\"LastError\":\"%s\","
+         "\"HttpRedirectToHttps\":0"
+#if HTTPS_FEASIBILITY_INSTRUMENT
+         ",\"HsOk\":%u,\"HsFail\":%u,\"HsUnknown\":%u,"
+         "\"HttpClientPolls\":%u,\"LastSslErr\":%d,\"TransportConnected\":%u,"
+         "\"HeapMinSampled\":%u,\"PeakIsSampled\":%u"
+#endif
+         "}}"),
+    (HttpsMode == HTTPS_MODE_CONFIRMED) ? "Confirmed" :
+      (HttpsMode == HTTPS_MODE_TRIAL) ? "Trial" : "Off",
+    HttpsListenerRunning ? 1 : 0,
+    HttpsFeasibilityConfirmedPersisted() ? 1 : 0,
+    (uint32_t)HTTPS_FEASIBILITY_PORT,
+    (HttpsMode == HTTPS_MODE_TRIAL && HttpsTrialDeadlineMs)
+      ? (uint32_t)((HttpsTrialDeadlineMs - millis()) / 1000UL) : 0U,
+    HttpsLastError[0] ? HttpsLastError : ""
+#if HTTPS_FEASIBILITY_INSTRUMENT
+    ,
+    HttpsMetrics.hs_ok,
+    HttpsMetrics.hs_fail,
+    HttpsMetrics.hs_unknown,
+    HttpsMetrics.http_client_polls,
+    HttpsMetrics.last_ssl_error,
+    HttpsMetrics.last_transport_connected ? 1 : 0,
+    HttpsMetrics.heap_min_sampled,
+    HttpsMetrics.peak_is_sampled ? 1 : 0
+#endif
+  );
+}
+
+bool HttpsFeasibilityCmnd(void) {
+  // HttpsWeb and HttpsMetrics share this handler.
+  if (strcasecmp_P(XdrvMailbox.topic, PSTR("HttpsMetrics")) == 0) {
+    HttpsFeasibilityRespondStatus();
+    return true;
+  }
+  if (strcasecmp_P(XdrvMailbox.topic, PSTR("HttpsWeb")) != 0) {
+    return false;
+  }
+
+  // External facade pointer is provided via Webserver global in caller context.
+  extern TasmotaWebServer *Webserver;
+
+  if (0 == XdrvMailbox.data_len) {
+    HttpsFeasibilityRespondStatus();
+    return true;
+  }
+
+  if (strcasecmp_P(XdrvMailbox.data, PSTR("0")) == 0 ||
+      strcasecmp_P(XdrvMailbox.data, PSTR("Off")) == 0 ||
+      strcasecmp_P(XdrvMailbox.data, PSTR("Stop")) == 0) {
+    const bool was_persisted = Settings->sbflag1.https_webserver;
+    Settings->sbflag1.https_webserver = 0;
+    HttpsMode = HTTPS_MODE_OFF;
+    HttpsFeasibilityStopListener(Webserver);
+    if (was_persisted) { SettingsSave(0); }
+    HttpsFeasibilityRespondStatus();
+    return true;
+  }
+
+  if (strcasecmp_P(XdrvMailbox.data, PSTR("1")) == 0 ||
+      strcasecmp_P(XdrvMailbox.data, PSTR("Trial")) == 0 ||
+      strcasecmp_P(XdrvMailbox.data, PSTR("Start")) == 0) {
+    // Trial: do NOT persist. Reboot must not re-enable.
+    Settings->sbflag1.https_webserver = 0;
+    if (!HttpsFeasibilityStartListener(Webserver)) {
+      HttpsMode = HTTPS_MODE_OFF;
+      HttpsFeasibilityRespondStatus();
+      return true;
+    }
+    extern void WebServerRegisterRoutesForHttps(void);
+    WebServerRegisterRoutesForHttps();
+    if (!HttpsFeasibilityBeginListener(Webserver)) {
+      HttpsFeasibilityStopListener(Webserver);
+      HttpsMode = HTTPS_MODE_OFF;
+      HttpsFeasibilityRespondStatus();
+      return true;
+    }
+
+    HttpsMode = HTTPS_MODE_TRIAL;
+    HttpsTrialDeadlineMs = millis() + (HTTPS_FEASIBILITY_TRIAL_SEC * 1000UL);
+    AddLog(LOG_LEVEL_INFO,
+           PSTR("HTTPS: trial active for %u s — confirm with HttpsWeb Confirm"),
+           (uint32_t)HTTPS_FEASIBILITY_TRIAL_SEC);
+    HttpsFeasibilityRespondStatus();
+    return true;
+  }
+
+  if (strcasecmp_P(XdrvMailbox.data, PSTR("2")) == 0 ||
+      strcasecmp_P(XdrvMailbox.data, PSTR("Confirm")) == 0) {
+    if (!HttpsListenerRunning) {
+      HttpsFeasibilitySetError("confirm_without_trial");
+      AddLog(LOG_LEVEL_ERROR, PSTR("HTTPS: Confirm ignored — start a trial first"));
+      HttpsFeasibilityRespondStatus();
+      return true;
+    }
+    Settings->sbflag1.https_webserver = 1;
+    HttpsMode = HTTPS_MODE_CONFIRMED;
+    HttpsTrialDeadlineMs = 0;
+    SettingsSave(0);
+    AddLog(LOG_LEVEL_INFO, PSTR("HTTPS: confirmed — persisted (factory reset clears)"));
+    HttpsFeasibilityRespondStatus();
+    return true;
+  }
+
+  HttpsFeasibilityRespondStatus();
   return true;
 }
 

@@ -30,4 +30,18 @@ Generated certs are **self-signed** EC P-256 with SANs (`tasmota-https-feasibili
 `localhost`, `127.0.0.1`). Browsers and strict TLS clients will not trust them without an
 explicit exception. Do not treat these as production credentials.
 
+## Optional HTTPS (M5-01A)
+
+HTTP `:80` is always the default management interface. HTTPS `:443` is compile-gated and
+**runtime-disabled by default**.
+
+```text
+HttpsWeb          # status JSON
+HttpsWeb Trial    # start non-persistent trial (auto-expires)
+HttpsWeb Confirm  # persist after successful trial
+HttpsWeb Off      # stop listener; clear persistence
+```
+
+`HttpRedirectToHttps` is reserved and disabled.
+
 Do not flash the managed Athom plug at 172.18.10.69 with this image.

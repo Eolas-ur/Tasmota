@@ -4,11 +4,17 @@
   Enabled only with -DUSE_WEBSERVER_HTTPS on env:tasmota-https-feasibility.
   Certificates are supplied via an external include path (not tracked in Git).
 
+  M5-01A: HTTPS is an optional second listener on :443. Plain HTTP on :80 remains
+  the default management interface. Runtime activation uses trial/confirm/rollback.
+
   Security (M5-00D): project-local overlay of WiFiClientSecureBearSSL.cpp
   (TLS 1.2 only + ECDHE-ECDSA-AES128-GCM for EC server).
 
   Trust: certificates are non-production / self-signed. Browsers and strict TLS
   clients will warn or require an explicit trust exception. No public CA chain.
+
+  Reserved (not implemented): HttpRedirectToHttps — default disabled forever until
+  a later milestone validates HTTPS reliability.
 */
 
 #ifndef HTTPS_FEASIBILITY_H
@@ -29,6 +35,10 @@
 
 #ifndef HTTPS_FEASIBILITY_INSTRUMENT
 #define HTTPS_FEASIBILITY_INSTRUMENT  1
+#endif
+
+#ifndef HTTPS_FEASIBILITY_TRIAL_SEC
+#define HTTPS_FEASIBILITY_TRIAL_SEC  300
 #endif
 
 #include <ESP8266WebServer.h>
@@ -65,20 +75,41 @@ public:
 using HttpsFeasibilityWebServer =
     esp8266webserver::ESP8266WebServerTemplate<HttpsFeasibilityWiFiServer>;
 
-// void* avoids Arduino .ino auto-prototype issues with incomplete template types.
-bool HttpsFeasibilityConfigureServer(void *webserver);
+// Configure TLS credentials on an HTTPS listener (TasmotaHttpsWebServer*).
+bool HttpsFeasibilityConfigureServer(void *https_webserver);
 
 // Overlay TLS checkpoints (no logging inside BearSSL TU).
 extern "C" void HttpsFeasibilityTlsCkpt(uint8_t stage, int32_t detail);
 extern "C" int HttpsFeasibilityTlsAcceptErr;
-// Authoritative handshake outcome from overlay _wait_for_handshake(): -1 none, 0 fail, 1 ok.
 extern "C" int8_t HttpsFeasibilityTlsHsOk;
+
+// ---- Experimental runtime control (M5-01A) ----
+enum HttpsFeasibilityMode : uint8_t {
+  HTTPS_MODE_OFF = 0,
+  HTTPS_MODE_TRIAL = 1,
+  HTTPS_MODE_CONFIRMED = 2,
+};
+
+bool HttpsFeasibilityIsCompiled(void);
+bool HttpsFeasibilityIsListenerRunning(void);
+uint8_t HttpsFeasibilityGetMode(void);  // HttpsFeasibilityMode as uint8_t (Arduino .ino prototypes)
+bool HttpsFeasibilityConfirmedPersisted(void);
+
+// Start TLS listener only (HTTP must already be running independently).
+// Call order: StartListener → WebServerRegisterRoutesForHttps → BeginListener.
+bool HttpsFeasibilityStartListener(void *facade_webserver);
+bool HttpsFeasibilityBeginListener(void *facade_webserver);
+void HttpsFeasibilityStopListener(void *facade_webserver);
+
+// Trial / confirm / off. Returns true if command handled.
+bool HttpsFeasibilityCmnd(void);
+void HttpsFeasibilityEverySecond(void *facade_webserver);
+void HttpsFeasibilityOnSettingsDefault(void);
 
 #if HTTPS_FEASIBILITY_INSTRUMENT
 void HttpsFeasibilityNoteInitHeaps(uint32_t heap_before, uint32_t heap_after);
-void HttpsFeasibilityBeforeHandleClient(void *webserver);
-void HttpsFeasibilityAfterHandleClient(void *webserver);
-bool HttpsFeasibilityCmnd(void);
+void HttpsFeasibilityBeforeHandleClient(void *https_webserver);
+void HttpsFeasibilityAfterHandleClient(void *https_webserver);
 void HttpsFeasibilityLogBootOnce(void);
 #endif
 

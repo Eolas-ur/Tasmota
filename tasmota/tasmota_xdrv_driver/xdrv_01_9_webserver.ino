@@ -654,6 +654,58 @@ void WebServer_removeRoute(const char * prefix, uint8_t method = HTTP_ANY) {
 
 /*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
 
+static void WebServerRegisterDispatchRoutes(void) {
+  if (Webserver == nullptr) { return; }
+
+  const char* headerkeys[] = { "Referer", "Host" };
+  size_t headerkeyssize = sizeof(headerkeys) / sizeof(char*);
+  Webserver->collectHeaders(headerkeys, headerkeyssize);
+
+  for (uint32_t i = 0; i < nitems(WebServerDispatch); i++) {
+    const WebServerDispatch_t & line = WebServerDispatch[i];
+    char uri[4];
+    uri[0] = '/';
+    uri[1] = pgm_read_byte(&line.uri[0]);
+    uri[2] = pgm_read_byte(&line.uri[1]);
+    uri[3] = '\0';
+    WebServer_on(uri, line.handler, pgm_read_byte(&line.method));
+  }
+  Webserver->onNotFound(HandleNotFound);
+  Webserver->on("/u2", HTTP_POST, HandleUploadDone, HandleUploadLoop);
+#ifndef FIRMWARE_MINIMAL
+  XdrvXsnsCall(FUNC_WEB_ADD_HANDLER);
+#endif  // Not FIRMWARE_MINIMAL
+}
+
+#ifdef USE_WEBSERVER_HTTPS
+// Bind routes onto the HTTPS listener only (do not duplicate onto HTTP).
+void WebServerRegisterRoutesForHttps(void) {
+  if ((Webserver == nullptr) || (Webserver->httpsServer() == nullptr)) { return; }
+  TasmotaHttpsWebServer *https = Webserver->httpsServer();
+
+  const char* headerkeys[] = { "Referer", "Host" };
+  https->collectHeaders(headerkeys, 2);
+
+  for (uint32_t i = 0; i < nitems(WebServerDispatch); i++) {
+    const WebServerDispatch_t & line = WebServerDispatch[i];
+    char uri[4];
+    uri[0] = '/';
+    uri[1] = pgm_read_byte(&line.uri[0]);
+    uri[2] = pgm_read_byte(&line.uri[1]);
+    uri[3] = '\0';
+    https->on(uri, (HTTPMethod)pgm_read_byte(&line.method), line.handler);
+  }
+  https->onNotFound(HandleNotFound);
+  https->on("/u2", HTTP_POST, HandleUploadDone, HandleUploadLoop);
+  // Driver handlers: briefly expose HTTPS via facade dual-on by calling ADD_HANDLER
+  // while HTTP on() is skipped — drivers use Webserver->on (both). To avoid HTTP
+  // duplication, call ADD_HANDLER only at initial HTTP setup. HTTPS gets core
+  // dispatch table; driver-specific routes remain HTTP-only in this milestone.
+}
+#endif  // USE_WEBSERVER_HTTPS
+
+/*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -*/
+
 // Always listens to all interfaces, so we don't need an IP address anymore
 void StartWebserver(int type) {
   if (!Settings->web_refresh) { Settings->web_refresh = HTTP_REFRESH_TIME; }
@@ -667,47 +719,15 @@ void StartWebserver(int type) {
     }
 
     if (!Webserver) {
-#ifdef USE_WEBSERVER_HTTPS
-      // Feasibility build: TLS listener replaces plain WEB_PORT. Captive-manager
-      // still requests port 80 but the socket is TLS (manager UX not validated here).
-      const int https_port = (HTTP_MANAGER == type || HTTP_MANAGER_RESET_ONLY == type) ? 80 : HTTPS_FEASIBILITY_PORT;
-      const uint32_t https_heap_before = ESP.getFreeHeap();
-      Webserver = new TasmotaWebServer(https_port);
-      if (!HttpsFeasibilityConfigureServer(Webserver)) {
-        AddLog(LOG_LEVEL_ERROR, PSTR(D_LOG_HTTP "HTTPS feasibility configure failed — not starting listener"));
-        delete Webserver;
-        Webserver = nullptr;
-        return;  // Fail closed: leave Web.state unchanged (no TLS-without-key socket)
+      const int http_port = (HTTP_MANAGER == type || HTTP_MANAGER_RESET_ONLY == type) ? 80 : WEB_PORT;
+      // Under USE_WEBSERVER_HTTPS, TasmotaWebServer is a facade that owns cleartext HTTP.
+      Webserver = new TasmotaWebServer(http_port);
+      if (Webserver == nullptr) {
+        AddLog(LOG_LEVEL_ERROR, PSTR(D_LOG_HTTP "HTTP listener allocation failed"));
+        return;
       }
-#if HTTPS_FEASIBILITY_INSTRUMENT
-      HttpsFeasibilityNoteInitHeaps(https_heap_before, ESP.getFreeHeap());
-#endif
-#else
-      Webserver = new TasmotaWebServer((HTTP_MANAGER == type || HTTP_MANAGER_RESET_ONLY == type) ? 80 : WEB_PORT);
-#endif  // USE_WEBSERVER_HTTPS
 
-      const char* headerkeys[] = { "Referer", "Host" };
-      size_t headerkeyssize = sizeof(headerkeys) / sizeof(char*);
-      Webserver->collectHeaders(headerkeys, headerkeyssize);
-
-      // call `Webserver->on()` on each entry
-      for (uint32_t i=0; i<nitems(WebServerDispatch); i++) {
-        const WebServerDispatch_t & line = WebServerDispatch[i];
-        // copy uri in RAM and prefix with '/'
-        char uri[4];
-        uri[0] = '/';
-        uri[1] = pgm_read_byte(&line.uri[0]);
-        uri[2] = pgm_read_byte(&line.uri[1]);
-        uri[3] = '\0';
-        // register
-        WebServer_on(uri, line.handler, pgm_read_byte(&line.method));
-      }
-      Webserver->onNotFound(HandleNotFound);
-//      Webserver->on(F("/u2"), HTTP_POST, HandleUploadDone, HandleUploadLoop);  // this call requires 2 functions so we keep a direct call
-      Webserver->on("/u2", HTTP_POST, HandleUploadDone, HandleUploadLoop);  // this call requires 2 functions so we keep a direct call
-#ifndef FIRMWARE_MINIMAL
-      XdrvXsnsCall(FUNC_WEB_ADD_HANDLER);
-#endif  // Not FIRMWARE_MINIMAL
+      WebServerRegisterDispatchRoutes();
 
       if (!Web.initial_config) {
         Web.initial_config = (!strlen(SettingsText(SET_STASSID1)) && !strlen(SettingsText(SET_STASSID2)));
@@ -716,7 +736,19 @@ void StartWebserver(int type) {
     }
     Web.reset_web_log_flag = false;
 
-    Webserver->begin(); // Web server start
+    Webserver->begin(); // HTTP web server start
+#ifdef USE_WEBSERVER_HTTPS
+    // Confirmed HTTPS only — never auto-start from an unconfirmed trial after reboot.
+    if (Settings->sbflag1.https_webserver &&
+        (HTTP_MANAGER != type) && (HTTP_MANAGER_RESET_ONLY != type)) {
+      if (HttpsFeasibilityStartListener(Webserver)) {
+        WebServerRegisterRoutesForHttps();
+        HttpsFeasibilityBeginListener(Webserver);
+      } else {
+        AddLog(LOG_LEVEL_ERROR, PSTR(D_LOG_HTTP "HTTPS persisted enable failed — HTTP continues"));
+      }
+    }
+#endif  // USE_WEBSERVER_HTTPS
   }
   if (Web.state != type) {
     AddLogServerActive(PSTR(D_LOG_HTTP "Web"));
@@ -729,6 +761,9 @@ void StartWebserver(int type) {
 
 void StopWebserver(void) {
   if (Web.state) {
+#ifdef USE_WEBSERVER_HTTPS
+    HttpsFeasibilityStopListener(Webserver);
+#endif
     Webserver->close();
     Web.state = HTTP_OFF;
     AddLog(LOG_LEVEL_INFO, PSTR(D_LOG_HTTP D_WEBSERVER_STOPPED));
@@ -742,7 +777,17 @@ void StopWebserver(void) {
 // Must be called BEFORE WifiShutdown() to prevent dangling pbufs.
 void WebserverStopSocket(void) {
   if (Webserver) {
-    Webserver->close();
+#ifdef USE_WEBSERVER_HTTPS
+    if (Webserver->httpsServer()) {
+      Webserver->httpsServer()->close();
+    }
+    if (Webserver->httpServer()) {
+      Webserver->httpServer()->close();
+    } else
+#endif
+    {
+      Webserver->close();
+    }
   }
 }
 
@@ -750,7 +795,19 @@ void WebserverStopSocket(void) {
 // This creates a fresh socket with an empty accept backlog.
 void WebserverStartSocket(void) {
   if (Webserver) {
-    Webserver->begin();
+#ifdef USE_WEBSERVER_HTTPS
+    if (Webserver->httpServer()) {
+      Webserver->httpServer()->begin();
+    } else
+#endif
+    {
+      Webserver->begin();
+    }
+#ifdef USE_WEBSERVER_HTTPS
+    if (Webserver->httpsServer()) {
+      Webserver->httpsServer()->begin();
+    }
+#endif
   }
 }
 
@@ -791,13 +848,24 @@ void WifiManagerBegin(bool reset_only) {
 void PollDnsWebserver(void) {
   if (DnsServer) { DnsServer->processNextRequest(); }
   if (Webserver && Web.state) {
-#if defined(USE_WEBSERVER_HTTPS) && HTTPS_FEASIBILITY_INSTRUMENT
-    HttpsFeasibilityBeforeHandleClient(Webserver);
+#ifdef USE_WEBSERVER_HTTPS
+    // HTTP first — always independent of TLS.
+    Webserver->setHttpsServing(false);
+    Webserver->handleClient();
+    if (HttpsFeasibilityIsListenerRunning() && Webserver->httpsServer()) {
+      Webserver->setHttpsServing(true);
+#if HTTPS_FEASIBILITY_INSTRUMENT
+      HttpsFeasibilityBeforeHandleClient(Webserver->httpsServer());
 #endif
-    Webserver->handleClient();   // handleClient() costs a delay(1); TLS handshake runs inside available()
-#if defined(USE_WEBSERVER_HTTPS) && HTTPS_FEASIBILITY_INSTRUMENT
-    HttpsFeasibilityAfterHandleClient(Webserver);
+      Webserver->handleClient();  // TLS accept/handshake inside available()
+#if HTTPS_FEASIBILITY_INSTRUMENT
+      HttpsFeasibilityAfterHandleClient(Webserver->httpsServer());
 #endif
+      Webserver->setHttpsServing(false);
+    }
+#else
+    Webserver->handleClient();
+#endif  // USE_WEBSERVER_HTTPS
   }
 }
 
@@ -1256,7 +1324,8 @@ void WSContentEnd(void) {
   if (Webserver->isChunked()) {
     const char *footer_empty = "0\r\n\r\n";
 #ifdef USE_WEBSERVER_HTTPS
-    // BearSSL WiFiClientSecure::write(const char*) writes strlen; use explicit length.
+    // When serving over BearSSL, write(const char*) uses strlen — always pass length.
+    // Safe for cleartext WiFiClient as well (explicit-length write).
     Webserver->client().write(reinterpret_cast<const uint8_t *>(footer_empty), 5);
 #else
     Webserver->client().write(footer_empty, 5);  // Signal end of chunked content in one write (doesn't clear core _chunked)
@@ -4809,6 +4878,9 @@ bool Xdrv01(uint32_t function) {
 #endif  // USE_EMULATION
       break;
     case FUNC_EVERY_SECOND:
+#ifdef USE_WEBSERVER_HTTPS
+      HttpsFeasibilityEverySecond(Webserver);
+#endif
       if (Web.initial_config) {
         Wifi.config_counter = 200;    // Do not restart the device if it has SSId Blank
       }
@@ -4879,7 +4951,7 @@ bool Xdrv01(uint32_t function) {
       break;
 #ifndef FIRMWARE_MINIMAL
     case FUNC_COMMAND:
-#if defined(USE_WEBSERVER_HTTPS) && HTTPS_FEASIBILITY_INSTRUMENT
+#ifdef USE_WEBSERVER_HTTPS
       if (HttpsFeasibilityCmnd()) {
         result = true;
         break;
