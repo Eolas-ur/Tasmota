@@ -1587,7 +1587,7 @@ void UfsListDir(char *path, uint8_t depth) {
     }
     char *ep;
     while (true) {
-      WiFiClient &client = Webserver->client();
+      auto &client = Webserver->client();
       // abort if the client disconnected
       // if there is a huge folder, then this gives a way out by refresh of browser
       if (!client.connected()){
@@ -1698,7 +1698,7 @@ uint8_t UfsDownloadFile(char *file) {
 
 #ifndef ESP32_DOWNLOAD_TASK
   // Live client reference avoids WiFiClient-by-value slicing of BearSSL.
-  WiFiClient &download_Client = Webserver->client();
+  auto &download_Client = Webserver->client();
   uint32_t flen = download_file.size();
 
   Webserver->setContentLength(flen);

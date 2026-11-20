@@ -10275,7 +10275,7 @@ uint8_t DownloadFile(char *file) {
     uint32_t flen = download_file.size();
 
     // Live client reference — avoids WiFiClient-by-value TLS slicing on HTTPS.
-    WiFiClient &download_Client = Webserver->client();
+    auto &download_Client = Webserver->client();
     Webserver->setContentLength(flen);
 
     char attachment[100];

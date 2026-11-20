@@ -200,7 +200,8 @@ class TestClientFacadeContracts(unittest.TestCase):
             / "tasmota_xdrv_driver"
             / "xdrv_01_9_webserver.ino"
         ).read_text(encoding="utf-8")
-        self.assertIn("WiFiClient &myClient = Webserver->client();", xdrv)
+        # auto& (or WiFiClient&) — never a by-value temporary that slices BearSSL.
+        self.assertRegex(xdrv, r"auto\s*&myClient\s*=\s*Webserver->client\(\)")
         self.assertNotIn("WiFiClient myClient = Webserver->client();", xdrv)
 
 

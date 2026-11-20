@@ -68,6 +68,12 @@ public:
     _owns_http = true;
   }
   ~TasmotaWebServer(void) {
+    // HTTPS instance is normally deleted by HttpsFeasibilityStopListenerImmediate;
+    // destructor covers residual ownership if the facade is destroyed first.
+    if (_https) {
+      delete _https;
+      _https = nullptr;
+    }
     if (_owns_http) {
       delete _http;
       _http = nullptr;
@@ -137,10 +143,16 @@ public:
   }
 
   // RequestHandler<ServerType> is not shareable across HTTP/HTTPS templates.
-  // Skip when targeting HTTPS-only so FUNC_WEB_ADD_HANDLER rebind does not
-  // duplicate HTTP addHandler registrations.
+  // When targeting HTTPS-only, reject without taking ownership and without
+  // deleting — callers that `new` a handler for dual registration must not
+  // allocate a second HTTP-typed handler during HTTPS rebind (use on() instead).
+  // Skipping prevents HTTP duplication and avoids use-after-free if the same
+  // pointer was already owned by the HTTP server.
   void addHandler(RequestHandler *handler) {
-    if (_route_target == TASMOTA_WEB_ROUTE_HTTPS) { return; }
+    if (_route_target == TASMOTA_WEB_ROUTE_HTTPS) {
+      (void)handler;
+      return;
+    }
     if (_http) { _http->addHandler(handler); }
   }
   void enableCORS(bool enable) {

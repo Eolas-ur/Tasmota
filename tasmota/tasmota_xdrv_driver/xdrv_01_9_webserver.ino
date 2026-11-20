@@ -769,7 +769,9 @@ void StartWebserver(int type) {
 void StopWebserver(void) {
   if (Web.state) {
 #ifdef USE_WEBSERVER_HTTPS
+    // May defer HTTPS delete while a TLS handler is still on the stack.
     HttpsFeasibilityStopListener(Webserver);
+    HttpsFeasibilityProcessDeferred(Webserver);
 #endif
     Webserver->close();
     Web.state = HTTP_OFF;
@@ -859,7 +861,7 @@ void PollDnsWebserver(void) {
     // HTTP first — always independent of TLS.
     Webserver->setHttpsServing(false);
     Webserver->handleClient();
-    if (HttpsFeasibilityIsListenerRunning() && Webserver->httpsServer()) {
+    if (Webserver->httpsServer() != nullptr) {
       Webserver->setHttpsServing(true);
 #if HTTPS_FEASIBILITY_INSTRUMENT
       HttpsFeasibilityBeforeHandleClient(Webserver->httpsServer());
@@ -869,6 +871,8 @@ void PollDnsWebserver(void) {
       HttpsFeasibilityAfterHandleClient(Webserver->httpsServer());
 #endif
       Webserver->setHttpsServing(false);
+      // Safe point: HTTPS handler stack has unwound.
+      HttpsFeasibilityProcessDeferred(Webserver);
     }
 #else
     Webserver->handleClient();
@@ -3120,8 +3124,9 @@ void HandleBackupConfiguration(void) {
   uint32_t config_len = SettingsConfigBackup();
   if (!config_len) { return; }    // Unable to allocate buffer
 
-  // Use live client reference — WiFiClient-by-value would slice BearSSL on HTTPS.
-  WiFiClient &myClient = Webserver->client();
+  // Live client reference — avoids WiFiClient-by-value BearSSL slicing on HTTPS.
+  // auto& keeps ESP8266 WiFiClient and ESP32 NetworkClient call sites portable.
+  auto &myClient = Webserver->client();
   Webserver->setContentLength(config_len);
 
   char attachment[TOPSZ];

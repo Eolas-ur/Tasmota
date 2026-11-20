@@ -1,9 +1,12 @@
 /*
   https_feasibility.ino - Optional BearSSL HTTPS listener + experimental safeguards.
 
-  M5-01A: HTTPS is disabled by default. HTTP remains independent on :80.
+  M5-01A/D: HTTPS is disabled by default. HTTP remains independent on :80.
   Activation uses RAM trial mode, explicit confirm into Settings->sbflag1.https_webserver,
   automatic trial expiry, and factory-reset clear (memset of Settings).
+
+  M5-01D: Listener teardown is deferred while httpsServing() so handlers cannot
+  destroy their own server mid-request (HttpsWeb Off/Trial over HTTPS).
 */
 
 #ifdef USE_WEBSERVER_HTTPS
@@ -24,6 +27,15 @@ static uint32_t HttpsTrialDeadlineMs = 0;
 static bool HttpsListenerRunning = false;
 static uint8_t HttpsBootFailCount = 0;
 static char HttpsLastError[40] = "";
+
+// Deferred teardown while an HTTPS request handler is on the stack.
+enum : uint8_t {
+  HTTPS_PEND_NONE = 0,
+  HTTPS_PEND_STOP = 1,
+  HTTPS_PEND_RESTART_TRIAL = 2,
+  HTTPS_PEND_SUSPEND_MANAGER = 3,
+};
+static uint8_t HttpsPendingOp = HTTPS_PEND_NONE;
 
 #if HTTPS_FEASIBILITY_INSTRUMENT
 
@@ -226,11 +238,22 @@ void HttpsFeasibilityOnSettingsDefault(void) {
   HttpsMode = HTTPS_MODE_OFF;
   HttpsTrialDeadlineMs = 0;
   HttpsListenerRunning = false;
+  HttpsPendingOp = HTTPS_PEND_NONE;
+  HttpsBootFailCount = 0;
   HttpsLastError[0] = '\0';
+}
+
+bool HttpsFeasibilityShutdownPending(void) {
+  return HttpsPendingOp != HTTPS_PEND_NONE;
 }
 
 static void HttpsFeasibilitySetError(const char *msg) {
   strlcpy(HttpsLastError, msg ? msg : "", sizeof(HttpsLastError));
+}
+
+static bool HttpsFeasibilityIsServing(void *facade_webserver) {
+  auto *facade = static_cast<TasmotaWebServer *>(facade_webserver);
+  return (facade != nullptr) && facade->httpsServing();
 }
 
 bool HttpsFeasibilityConfigureServer(void *https_webserver) {
@@ -279,11 +302,14 @@ bool HttpsFeasibilityStartListener(void *facade_webserver) {
     HttpsFeasibilitySetError("no_facade");
     return false;
   }
+  if (HttpsPendingOp != HTTPS_PEND_NONE) {
+    HttpsFeasibilitySetError("shutdown_pending");
+    return false;
+  }
   if (HttpsListenerRunning && facade->httpsServer() != nullptr) {
     return true;
   }
 
-  const uint32_t heap_before = ESP.getFreeHeap();
   auto *https = new TasmotaHttpsWebServer(HTTPS_FEASIBILITY_PORT);
   if (https == nullptr) {
     HttpsFeasibilitySetError("oom_server");
@@ -302,12 +328,8 @@ bool HttpsFeasibilityStartListener(void *facade_webserver) {
   const char* headerkeys[] = { "Referer", "Host" };
   https->collectHeaders(headerkeys, 2);
 
-  // Caller must invoke WebServerRegisterRoutesForHttps() then we begin().
-  // For boot-restore path the caller registers then we need begin — done below
-  // after optional mode mark. Routes may be empty until caller registers; begin
-  // is deferred to HttpsFeasibilityBeginListener().
-  HttpsListenerRunning = false;  // not accepting until BeginListener
-  (void)heap_before;
+  // Routes bound by caller; begin deferred to HttpsFeasibilityBeginListener().
+  HttpsListenerRunning = false;
   if (Settings->sbflag1.https_webserver) {
     HttpsMode = HTTPS_MODE_CONFIRMED;
   }
@@ -324,7 +346,7 @@ bool HttpsFeasibilityBeginListener(void *facade_webserver) {
   const uint32_t heap_before = ESP.getFreeHeap();
   facade->httpsServer()->begin();
   HttpsListenerRunning = true;
-  HttpsBootFailCount = 0;
+  HttpsBootFailCount = 0;  // reset only after successful listener init (not handshake)
 #if HTTPS_FEASIBILITY_INSTRUMENT
   HttpsFeasibilityNoteInitHeaps(heap_before, ESP.getFreeHeap());
 #endif
@@ -333,35 +355,113 @@ bool HttpsFeasibilityBeginListener(void *facade_webserver) {
   return true;
 }
 
+static void HttpsFeasibilityStopListenerImmediate(void *facade_webserver) {
+  auto *facade = static_cast<TasmotaWebServer *>(facade_webserver);
+  if (facade == nullptr) {
+    return;
+  }
+  // Must not run while httpsServing() — caller guarantees deferred path.
+  TasmotaHttpsWebServer *https = facade->httpsServer();
+  if (https != nullptr) {
+    https->close();
+    delete https;  // destroys routes registered on this instance only
+    facade->attachHttps(nullptr);
+  }
+  HttpsListenerRunning = false;
+  HttpsTrialDeadlineMs = 0;
+  // Cert/key objects intentionally retained (HttpsFeasibilityReady) for reuse.
+  // BearSSL stack_thunk refcount drops as secure clients destruct; may linger briefly.
+  AddLog(LOG_LEVEL_INFO, PSTR("HTTPS: listener stopped (HTTP unchanged; cert cache retained)"));
+}
+
 void HttpsFeasibilityStopListener(void *facade_webserver) {
   auto *facade = static_cast<TasmotaWebServer *>(facade_webserver);
   if (facade == nullptr) {
     return;
   }
-  TasmotaHttpsWebServer *https = facade->httpsServer();
-  if (https != nullptr) {
-    https->close();
-    delete https;
-    facade->attachHttps(nullptr);
+  if (HttpsFeasibilityIsServing(facade_webserver)) {
+    // Prefer STOP over any earlier deferred op (e.g. trial restart / manager suspend).
+    // Finish the active response first; PollDnsWebserver processes deferred stop.
+    HttpsPendingOp = HTTPS_PEND_STOP;
+    AddLog(LOG_LEVEL_INFO, PSTR("HTTPS: stop deferred until active request completes"));
+    return;
   }
-  HttpsListenerRunning = false;
+  HttpsPendingOp = HTTPS_PEND_NONE;
+  HttpsFeasibilityStopListenerImmediate(facade_webserver);
   if (HttpsMode != HTTPS_MODE_CONFIRMED) {
     HttpsMode = HTTPS_MODE_OFF;
   }
-  HttpsTrialDeadlineMs = 0;
-  AddLog(LOG_LEVEL_INFO, PSTR("HTTPS: listener stopped (HTTP unchanged)"));
+}
+
+static bool HttpsFeasibilityStartTrialNow(void *facade_webserver) {
+  extern void WebServerRegisterRoutesForHttps(void);
+  if (!HttpsFeasibilityStartListener(facade_webserver)) {
+    HttpsMode = HTTPS_MODE_OFF;
+    return false;
+  }
+  WebServerRegisterRoutesForHttps();
+  if (!HttpsFeasibilityBeginListener(facade_webserver)) {
+    HttpsFeasibilityStopListenerImmediate(facade_webserver);
+    HttpsMode = HTTPS_MODE_OFF;
+    return false;
+  }
+  HttpsMode = HTTPS_MODE_TRIAL;
+  HttpsTrialDeadlineMs = millis() + (HTTPS_FEASIBILITY_TRIAL_SEC * 1000UL);
+  AddLog(LOG_LEVEL_INFO,
+         PSTR("HTTPS: trial active for %u s — confirm with HttpsWeb Confirm"),
+         (uint32_t)HTTPS_FEASIBILITY_TRIAL_SEC);
+  return true;
+}
+
+void HttpsFeasibilityProcessDeferred(void *facade_webserver) {
+  if (HttpsPendingOp == HTTPS_PEND_NONE) {
+    return;
+  }
+  if (HttpsFeasibilityIsServing(facade_webserver)) {
+    return;
+  }
+
+  const uint8_t op = HttpsPendingOp;
+  HttpsPendingOp = HTTPS_PEND_NONE;
+
+  switch (op) {
+    case HTTPS_PEND_STOP:
+      HttpsFeasibilityStopListenerImmediate(facade_webserver);
+      HttpsMode = HTTPS_MODE_OFF;
+      break;
+    case HTTPS_PEND_RESTART_TRIAL:
+      HttpsFeasibilityStopListenerImmediate(facade_webserver);
+      HttpsMode = HTTPS_MODE_OFF;
+      HttpsFeasibilityStartTrialNow(facade_webserver);
+      break;
+    case HTTPS_PEND_SUSPEND_MANAGER:
+      HttpsFeasibilityStopListenerImmediate(facade_webserver);
+      if (Settings->sbflag1.https_webserver) {
+        HttpsMode = HTTPS_MODE_CONFIRMED;
+      } else {
+        HttpsMode = HTTPS_MODE_OFF;
+      }
+      AddLog(LOG_LEVEL_INFO, PSTR("HTTPS: suspended for Wi-Fi manager (HTTP captive active)"));
+      break;
+    default:
+      break;
+  }
 }
 
 void HttpsFeasibilitySuspendForManager(void *facade_webserver) {
   auto *facade = static_cast<TasmotaWebServer *>(facade_webserver);
   if (facade == nullptr) { return; }
-  // Drop the TLS listener during captive/manager; keep confirmed persistence.
   if (!HttpsListenerRunning && (facade->httpsServer() == nullptr)) {
     return;
   }
-  HttpsFeasibilityStopListener(facade_webserver);
+  if (HttpsFeasibilityIsServing(facade_webserver)) {
+    HttpsPendingOp = HTTPS_PEND_SUSPEND_MANAGER;
+    AddLog(LOG_LEVEL_INFO, PSTR("HTTPS: manager suspend deferred until request completes"));
+    return;
+  }
+  HttpsFeasibilityStopListenerImmediate(facade_webserver);
   if (Settings->sbflag1.https_webserver) {
-    HttpsMode = HTTPS_MODE_CONFIRMED;  // listener restarted when STA web returns
+    HttpsMode = HTTPS_MODE_CONFIRMED;
   } else {
     HttpsMode = HTTPS_MODE_OFF;
   }
@@ -370,6 +470,7 @@ void HttpsFeasibilitySuspendForManager(void *facade_webserver) {
 
 void HttpsFeasibilityNoteBootFailure(void *facade_webserver) {
   (void)facade_webserver;
+  // Listener *initialisation* failure only — not TLS handshake failure, not WDT.
   AddLog(LOG_LEVEL_ERROR, PSTR("HTTPS: persisted enable failed — HTTP continues"));
   if (!Settings->sbflag1.https_webserver) {
     return;
@@ -377,8 +478,7 @@ void HttpsFeasibilityNoteBootFailure(void *facade_webserver) {
   if (HttpsBootFailCount < 255) {
     HttpsBootFailCount++;
   }
-  // After repeated confirmed-start failures within this uptime, clear persistence once.
-  // Survives soft issues without wiping Wi-Fi; lost on power cycle (by design — avoids RTC redesign).
+  // Soft start failures within one uptime. Hard abort/WDT before this runs is not covered.
   if (HttpsBootFailCount >= HTTPS_FEASIBILITY_BOOT_FAIL_LIMIT) {
     Settings->sbflag1.https_webserver = 0;
     HttpsMode = HTTPS_MODE_OFF;
@@ -394,6 +494,8 @@ void HttpsFeasibilityNoteBootFailure(void *facade_webserver) {
 }
 
 void HttpsFeasibilityEverySecond(void *facade_webserver) {
+  HttpsFeasibilityProcessDeferred(facade_webserver);
+
   if (HttpsMode != HTTPS_MODE_TRIAL) {
     return;
   }
@@ -404,10 +506,10 @@ void HttpsFeasibilityEverySecond(void *facade_webserver) {
     return;
   }
   AddLog(LOG_LEVEL_INFO, PSTR("HTTPS: trial expired — reverting (not persisted)"));
-  HttpsFeasibilityStopListener(facade_webserver);
-  HttpsMode = HTTPS_MODE_OFF;
-  // Ensure confirmed bit stays clear for unconfirmed trials.
   Settings->sbflag1.https_webserver = 0;
+  HttpsMode = HTTPS_MODE_OFF;
+  HttpsFeasibilityStopListener(facade_webserver);  // may defer if busy
+  HttpsFeasibilityProcessDeferred(facade_webserver);
 }
 
 static void HttpsFeasibilityRespondStatus(void) {
@@ -417,10 +519,12 @@ static void HttpsFeasibilityRespondStatus(void) {
          "\"Mode\":\"%s\","
          "\"Listener\":%u,"
          "\"Persisted\":%u,"
+         "\"ShutdownPending\":%u,"
          "\"Port\":%u,"
          "\"TrialRemainSec\":%u,"
          "\"LastError\":\"%s\","
-         "\"HttpRedirectToHttps\":0"
+         "\"HttpRedirectToHttps\":0,"
+         "\"CertCache\":%u"
 #if HTTPS_FEASIBILITY_INSTRUMENT
          ",\"HsOk\":%u,\"HsFail\":%u,\"HsUnknown\":%u,"
          "\"HttpClientPolls\":%u,\"LastSslErr\":%d,\"TransportConnected\":%u,"
@@ -431,10 +535,12 @@ static void HttpsFeasibilityRespondStatus(void) {
       (HttpsMode == HTTPS_MODE_TRIAL) ? "Trial" : "Off",
     HttpsListenerRunning ? 1 : 0,
     HttpsFeasibilityConfirmedPersisted() ? 1 : 0,
+    HttpsFeasibilityShutdownPending() ? 1 : 0,
     (uint32_t)HTTPS_FEASIBILITY_PORT,
     (HttpsMode == HTTPS_MODE_TRIAL && HttpsTrialDeadlineMs)
       ? (uint32_t)((HttpsTrialDeadlineMs - millis()) / 1000UL) : 0U,
-    HttpsLastError[0] ? HttpsLastError : ""
+    HttpsLastError[0] ? HttpsLastError : "",
+    HttpsFeasibilityReady ? 1 : 0
 #if HTTPS_FEASIBILITY_INSTRUMENT
     ,
     HttpsMetrics.hs_ok,
@@ -450,7 +556,6 @@ static void HttpsFeasibilityRespondStatus(void) {
 }
 
 bool HttpsFeasibilityCmnd(void) {
-  // HttpsWeb and HttpsMetrics share this handler.
   if (strcasecmp_P(XdrvMailbox.topic, PSTR("HttpsMetrics")) == 0) {
     HttpsFeasibilityRespondStatus();
     return true;
@@ -459,7 +564,6 @@ bool HttpsFeasibilityCmnd(void) {
     return false;
   }
 
-  // External facade pointer is provided via Webserver global in caller context.
   extern TasmotaWebServer *Webserver;
 
   if (0 == XdrvMailbox.data_len) {
@@ -473,6 +577,7 @@ bool HttpsFeasibilityCmnd(void) {
     const bool was_persisted = Settings->sbflag1.https_webserver;
     Settings->sbflag1.https_webserver = 0;
     HttpsMode = HTTPS_MODE_OFF;
+    // If this command arrived over HTTPS, stop is deferred until after the response.
     HttpsFeasibilityStopListener(Webserver);
     if (was_persisted) { SettingsSave(0); }
     HttpsFeasibilityRespondStatus();
@@ -482,43 +587,32 @@ bool HttpsFeasibilityCmnd(void) {
   if (strcasecmp_P(XdrvMailbox.data, PSTR("1")) == 0 ||
       strcasecmp_P(XdrvMailbox.data, PSTR("Trial")) == 0 ||
       strcasecmp_P(XdrvMailbox.data, PSTR("Start")) == 0) {
-    // Trial: do NOT persist. Reboot must not re-enable.
-    // Confirmed → Trial demotes persistence first.
     const bool was_persisted = Settings->sbflag1.https_webserver;
     Settings->sbflag1.https_webserver = 0;
     if (was_persisted) { SettingsSave(0); }
 
-    if (HttpsListenerRunning) {
-      HttpsFeasibilityStopListener(Webserver);
+    if (HttpsFeasibilityIsServing(Webserver) &&
+        (HttpsListenerRunning || (Webserver->httpsServer() != nullptr))) {
+      // Restart after the current HTTPS response completes.
+      HttpsPendingOp = HTTPS_PEND_RESTART_TRIAL;
+      HttpsMode = HTTPS_MODE_OFF;
+      AddLog(LOG_LEVEL_INFO, PSTR("HTTPS: trial restart deferred until active request completes"));
+      HttpsFeasibilityRespondStatus();
+      return true;
+    }
+
+    if (HttpsListenerRunning || (Webserver->httpsServer() != nullptr)) {
+      HttpsFeasibilityStopListenerImmediate(Webserver);
     }
     HttpsMode = HTTPS_MODE_OFF;
-
-    if (!HttpsFeasibilityStartListener(Webserver)) {
-      HttpsMode = HTTPS_MODE_OFF;
-      HttpsFeasibilityRespondStatus();
-      return true;
-    }
-    extern void WebServerRegisterRoutesForHttps(void);
-    WebServerRegisterRoutesForHttps();
-    if (!HttpsFeasibilityBeginListener(Webserver)) {
-      HttpsFeasibilityStopListener(Webserver);
-      HttpsMode = HTTPS_MODE_OFF;
-      HttpsFeasibilityRespondStatus();
-      return true;
-    }
-
-    HttpsMode = HTTPS_MODE_TRIAL;
-    HttpsTrialDeadlineMs = millis() + (HTTPS_FEASIBILITY_TRIAL_SEC * 1000UL);
-    AddLog(LOG_LEVEL_INFO,
-           PSTR("HTTPS: trial active for %u s — confirm with HttpsWeb Confirm"),
-           (uint32_t)HTTPS_FEASIBILITY_TRIAL_SEC);
+    HttpsFeasibilityStartTrialNow(Webserver);
     HttpsFeasibilityRespondStatus();
     return true;
   }
 
   if (strcasecmp_P(XdrvMailbox.data, PSTR("2")) == 0 ||
       strcasecmp_P(XdrvMailbox.data, PSTR("Confirm")) == 0) {
-    if (!HttpsListenerRunning) {
+    if (!HttpsListenerRunning || HttpsFeasibilityShutdownPending()) {
       HttpsFeasibilitySetError("confirm_without_trial");
       AddLog(LOG_LEVEL_ERROR, PSTR("HTTPS: Confirm ignored — start a trial first"));
       HttpsFeasibilityRespondStatus();

@@ -4,8 +4,9 @@
   Enabled only with -DUSE_WEBSERVER_HTTPS on env:tasmota-https-feasibility.
   Certificates are supplied via an external include path (not tracked in Git).
 
-  M5-01A: HTTPS is an optional second listener on :443. Plain HTTP on :80 remains
-  the default management interface. Runtime activation uses trial/confirm/rollback.
+  M5-01A/D: HTTPS is an optional second listener on :443. Plain HTTP on :80 remains
+  the default. Runtime activation uses trial/confirm/rollback. Listener teardown is
+  deferred while an HTTPS request handler is executing (M5-01D).
 
   Security (M5-00D): project-local overlay of WiFiClientSecureBearSSL.cpp
   (TLS 1.2 only + ECDHE-ECDSA-AES128-GCM for EC server).
@@ -39,6 +40,10 @@
 
 #ifndef HTTPS_FEASIBILITY_TRIAL_SEC
 #define HTTPS_FEASIBILITY_TRIAL_SEC  300
+#endif
+
+#ifndef HTTPS_FEASIBILITY_BOOT_FAIL_LIMIT
+#define HTTPS_FEASIBILITY_BOOT_FAIL_LIMIT  3
 #endif
 
 #include <ESP8266WebServer.h>
@@ -75,15 +80,12 @@ public:
 using HttpsFeasibilityWebServer =
     esp8266webserver::ESP8266WebServerTemplate<HttpsFeasibilityWiFiServer>;
 
-// Configure TLS credentials on an HTTPS listener (TasmotaHttpsWebServer*).
 bool HttpsFeasibilityConfigureServer(void *https_webserver);
 
-// Overlay TLS checkpoints (no logging inside BearSSL TU).
 extern "C" void HttpsFeasibilityTlsCkpt(uint8_t stage, int32_t detail);
 extern "C" int HttpsFeasibilityTlsAcceptErr;
 extern "C" int8_t HttpsFeasibilityTlsHsOk;
 
-// ---- Experimental runtime control (M5-01A) ----
 enum HttpsFeasibilityMode : uint8_t {
   HTTPS_MODE_OFF = 0,
   HTTPS_MODE_TRIAL = 1,
@@ -92,22 +94,20 @@ enum HttpsFeasibilityMode : uint8_t {
 
 bool HttpsFeasibilityIsCompiled(void);
 bool HttpsFeasibilityIsListenerRunning(void);
-uint8_t HttpsFeasibilityGetMode(void);  // HttpsFeasibilityMode as uint8_t (Arduino .ino prototypes)
+uint8_t HttpsFeasibilityGetMode(void);
 bool HttpsFeasibilityConfirmedPersisted(void);
+bool HttpsFeasibilityShutdownPending(void);
 
-#ifndef HTTPS_FEASIBILITY_BOOT_FAIL_LIMIT
-#define HTTPS_FEASIBILITY_BOOT_FAIL_LIMIT  3
-#endif
-
-// Start TLS listener only (HTTP must already be running independently).
 // Call order: StartListener → WebServerRegisterRoutesForHttps → BeginListener.
 bool HttpsFeasibilityStartListener(void *facade_webserver);
 bool HttpsFeasibilityBeginListener(void *facade_webserver);
+
+// Safe stop: defers destruction while an HTTPS handler is executing.
 void HttpsFeasibilityStopListener(void *facade_webserver);
 void HttpsFeasibilitySuspendForManager(void *facade_webserver);
 void HttpsFeasibilityNoteBootFailure(void *facade_webserver);
+void HttpsFeasibilityProcessDeferred(void *facade_webserver);
 
-// Trial / confirm / off. Returns true if command handled.
 bool HttpsFeasibilityCmnd(void);
 void HttpsFeasibilityEverySecond(void *facade_webserver);
 void HttpsFeasibilityOnSettingsDefault(void);
